@@ -361,6 +361,23 @@ def devicectl_json(*args, timeout: Optional[float] = None) -> dict:
         return json.loads(out.read_text())
 
 
+# Apple TV models by devicectl's productType. gpu: the GPU architecture of the pipeline archive made on the Mac for that TV (pso_offline.py; its log's device line names it), so the
+# TV does not build each pipeline the first time a scene shows. The archive is read only on the Metal 4 path (DM_PSO_MTL4=1), which the A15 runs without. The A19 also defaults to
+# Docked and the texture cap off in the app: it has BC textures and memory to spare (tvport/A19_PLAN.md, phase 1)
+TV_MODELS = {'AppleTV14,1': {'chip': 'A15', 'gpu': ''}, 'AppleTV18,1': {'chip': 'A19', 'gpu': 'g18p'}}
+
+
+def tv_model(device: Optional[str]) -> dict:
+    """What TVPort knows about the TV with this UDID ({} when it is not listed or not known)."""
+    if not device:
+        return {}
+    try:
+        tvs = apple_tvs(devicectl_json('list', 'devices'))
+    except (Failure, json.JSONDecodeError):
+        return {}
+    return next((TV_MODELS.get(tv['product'], {}) for tv in tvs if tv['id'] == device), {})
+
+
 def apple_tvs(listing: dict) -> list:
     tvs = []
     for device in listing.get('result', {}).get('devices', []):
@@ -368,7 +385,9 @@ def apple_tvs(listing: dict) -> list:
         if hardware.get('deviceType') != 'appleTV' or hardware.get('reality') != 'physical':
             continue
         properties, connection = device.get('deviceProperties', {}), device.get('connectionProperties', {})
+        product = hardware.get('productType') or ''
         tvs.append({'id': hardware.get('udid'), 'name': properties.get('name'), 'model': hardware.get('marketingName'), 'os': properties.get('osVersionNumber'),
+                    'product': product, 'chip': TV_MODELS.get(product, {}).get('chip', ''),
                     'connected': connection.get('tunnelState') == 'connected', 'developer_mode': properties.get('developerModeStatus') == 'enabled'})
     return tvs
 
@@ -608,7 +627,7 @@ def restore_saves(game: Game, device: str, bundle: str) -> int:
     return len(names)
 
 
-def write_env(game: Game, mode: str, texture_cap: int, players: str = '', render_scale: float = 1.0, thermal_cap: bool = True, fps_target: int = 0) -> Path:
+def write_env(game: Game, mode: str, texture_cap: int, players: str = '', render_scale: float = 1.0, thermal_cap: bool = True, fps_target: int = 0, archive: bool = False) -> Path:
     """The switches the app reads at launch (main.m, dm/env.txt)."""
     path = game.build / 'tvport-env.txt'
     lines = ['# Written by TVPort', f'DM_OPMODE={0 if mode == "handheld" else 1}', f'DM_BC_MAX_DIM={texture_cap}']
@@ -618,6 +637,8 @@ def write_env(game: Game, mode: str, texture_cap: int, players: str = '', render
         lines.append(f'DM_FPS_TARGET={fps_target}')
     if not thermal_cap:   # the frame step keeps its cap when the TV is hot; tvOS lowers the clocks then all the same (docs/reference/frame-rate.md)
         lines.append('DM_THERMAL_CAP=0')
+    if archive:   # the Metal 4 pipeline path, which reads the pipeline archive bundled with the app (nvn_mtl.m pso_bundle_open)
+        lines.append('DM_PSO_MTL4=1')
     if players.strip():
         lines.append('DM_TV_PLAYERS=' + ' '.join(players.split()))
     path.write_text('\n'.join(lines) + '\n')
@@ -662,10 +683,14 @@ def prepare_game(game: Game, keys: Optional[Path], team: str, python: str) -> Ga
 def generate_project(game: Game, args, team: str, bundle: str, python: str) -> Path:
     stage('Generating the Apple TV project')
     restore_tables(game)
+    gpu = tv_model(args.device).get('gpu', '')
     env = profile_env(game)
     env.update(GAME=game.title_id, W=str(game.build), PATCHED=str(game.build / f'patched_{game.package}'), ROMFS=str(game.romfs), MSL_IOS=str(game.shaders), AOC='',
-               DM_TVOS='1', DM_COPY_ROMFS='NO', DM_SHOW_FPS='1' if args.fps else '0', DM_ENV_FILE=str(write_env(game, args.mode, args.texture_cap, args.players, args.render_scale, not args.no_thermal_cap, args.fps_target)), DM_BUNDLE_ID=bundle, DM_TEAM_ID=team,
+               DM_TVOS='1', DM_COPY_ROMFS='NO', DM_SHOW_FPS='1' if args.fps else '0', DM_ENV_FILE=str(write_env(game, args.mode, args.texture_cap, args.players, args.render_scale, not args.no_thermal_cap, args.fps_target, archive=bool(gpu))), DM_BUNDLE_ID=bundle, DM_TEAM_ID=team,
                DM_XCODE_PROJECT_DIR=str(game.build / 'tvport-xcode'), DM_XCODE_DERIVED_DATA=str(game.build / 'tvport-derived'), FONT_PY=python)
+    env['DM_PSO_GPUS'] = gpu or 'none'   # build_ipa.sh makes the archive for it (minutes the first time; again only when its inputs change)
+    if gpu:
+        emit('log', line=f'This Apple TV gets a pipeline archive for its GPU ({gpu}), so it does not build pipelines while you play. The first time, this adds a few minutes.')
     art = args.art or game.icon
     if art:
         env['DM_ICON'] = str(art)

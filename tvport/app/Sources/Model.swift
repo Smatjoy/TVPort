@@ -7,7 +7,7 @@ enum RenderMode: String, Codable, CaseIterable, Identifiable {
     var label: String { self == .handheld ? "Handheld (720p)" : "Docked (900p)" }
     var note: String {
         self == .handheld ? "Lighter on the GPU and on memory. Some games lose motion controls in this mode."
-                          : "Sharper, but the A15 can't always hold it, and it leaves less memory."
+                          : "Sharper. The A15 can't always hold it, and it leaves less memory there; the A19 can."
     }
 }
 
@@ -101,9 +101,13 @@ final class Library: ObservableObject {
         save()
     }
 
+    var currentTV: AppleTV? { devices.first { $0.id == device } }
+
     func add(folder: URL) {
         if !games.contains(where: { $0.folder == folder.path }) {
-            games.append(Game(folder: folder.path, name: folder.lastPathComponent))
+            var game = Game(folder: folder.path, name: folder.lastPathComponent)
+            if currentTV?.chip == "A19" { game.mode = .docked; game.texture = .full }   // BC textures in hardware and memory to spare (tvport/A19_PLAN.md)
+            games.append(game)
             save()
         }
         selection = folder.path

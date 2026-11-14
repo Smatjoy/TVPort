@@ -429,6 +429,12 @@ class Saves(unittest.TestCase):
             self.assertIn('DM_THERMAL_CAP=0\n', backend.write_env(game, 'handheld', 512, '', 1.0, False).read_text())
             self.assertNotIn('DM_THERMAL_CAP', backend.write_env(game, 'handheld', 512, '').read_text())
 
+    def test_archive_turns_on_the_metal_4_path(self):
+        with tempfile.TemporaryDirectory() as folder:
+            game = self.make_game(folder)
+            self.assertIn('DM_PSO_MTL4=1\n', backend.write_env(game, 'docked', 0, archive=True).read_text())
+            self.assertNotIn('DM_PSO_MTL4', backend.write_env(game, 'handheld', 512).read_text())
+
 
 class FindKeys(unittest.TestCase):
     def test_keys_beside_the_game_win(self):
@@ -458,6 +464,16 @@ class Devices(unittest.TestCase):
         tvs = backend.apple_tvs(listing)
         self.assertEqual([t['id'] for t in tvs], ['TV'])
         self.assertTrue(tvs[0]['connected'] and tvs[0]['developer_mode'])
+
+    def test_knows_the_chip(self):
+        def listing(product):
+            return {'result': {'devices': [{'hardwareProperties': {'deviceType': 'appleTV', 'reality': 'physical', 'udid': 'TV', 'productType': product}}]}}
+        self.assertEqual(backend.apple_tvs(listing('AppleTV18,1'))[0]['chip'], 'A19')
+        self.assertEqual(backend.apple_tvs(listing('AppleTV14,1'))[0]['chip'], 'A15')
+        self.assertEqual(backend.apple_tvs(listing('AppleTV99,9'))[0]['chip'], '')   # a model TVPort does not know gets today's defaults
+        self.assertEqual(backend.TV_MODELS['AppleTV18,1']['gpu'], 'g18p')
+        self.assertEqual(backend.TV_MODELS['AppleTV14,1']['gpu'], '')   # the A15 keeps the MTLDevice path, without an archive
+        self.assertEqual(backend.tv_model(None), {})
 
 
 class GameFolder(unittest.TestCase):

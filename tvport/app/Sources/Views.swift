@@ -276,7 +276,8 @@ struct SettingsForm: View {
                 Picker("Render mode", selection: binding(\.mode)) { ForEach(RenderMode.allCases) { Text($0.label).tag($0) } }
                 Text(library.current?.mode.note ?? "").font(.caption).foregroundStyle(.secondary)
                 Picker("Texture detail", selection: binding(\.texture)) { ForEach(TextureDetail.allCases) { Text($0.label).tag($0) } }
-                Text("The A15 has to store these textures uncompressed, so lower detail saves memory and shortens loading.").font(.caption).foregroundStyle(.secondary)
+                Text(library.currentTV?.chip == "A19" ? "This Apple TV reads these textures as they are, so Full costs little."
+                                                      : "The A15 has to store these textures uncompressed, so lower detail saves memory and shortens loading.").font(.caption).foregroundStyle(.secondary)
                 if library.info?.render_scale == true {
                     Picker("3D resolution", selection: renderScaleBinding) {
                         ForEach([1.0, 0.9, 0.8, 0.75, 0.7, 0.6, 0.5], id: \.self) { Text($0 == 1 ? "Full" : "\(Int(($0 * 100).rounded()))%").tag($0) }

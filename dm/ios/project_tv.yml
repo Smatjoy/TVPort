@@ -26,6 +26,8 @@ targets:
         compilerFlags: "-Dmain=dm_main"
     dependencies:
       - sdk: libcompression.tbd   # SourcesTV/TVSaves.m
+      - sdk: AVKit.framework      # AVDisplayManager: the display's refresh rate matched to the game's (front_ios.m front_screen_match)
+      - sdk: CoreMedia.framework  # the format description that request takes
     postBuildScripts:
       - name: Copy game resources
         script: /bin/bash "${SRCROOT}/tools/stage_resources.sh"

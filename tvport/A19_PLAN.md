@@ -89,6 +89,13 @@ The one-at-a-time runs are dropped. Phase 1's facts decide each A15 workaround d
 
 Landed together in one build once phase 1's facts are in, and checked with one run per game:
 
+**Status (2026-11-15): items 1, 2, 3 and the 60 Hz request are in code, not yet run on the TV.** Items 4 and 5 wait for the device report's memory limit.
+
+- **60 Hz** (from phase 1): tvOS's `front_screen_match` in `dm/ios/Sources/front_ios.m` asks for a display mode at the game's rate through `AVDisplayManager.preferredDisplayCriteria` (30 fps asks for 60 Hz). tvOS follows it only with Settings > Video and Audio > Match Content > Match Frame Rate on; the log says which. `DM_SCREEN_MATCH=0` turns it off.
+- **Item 1:** `front_ios_device_report` logs `front end: device …`: model, GPU name and architecture, Metal family, BC, RAM, memory limit (available + footprint), thermal state.
+- **Item 2:** `backend.py` `TV_MODELS` knows `AppleTV14,1` (A15) and `AppleTV18,1` (A19). A game added with an A19 selected starts at Docked and Full texture detail. 3D resolution already defaults to Full.
+- **Item 3:** for an A19, the build sets `DM_PSO_GPUS=g18p` (the archive, made by `build_ipa.sh` with `metal-tt`) and writes `DM_PSO_MTL4=1`. If the TV's architecture isn't `g18p` or tvOS can't open an iOS archive, the log says so (`pipeline archive bundled with the app: …`) and the TV builds the pipelines itself, as before.
+
 1. **Device report at launch.** One log line with the model (`hw.machine`), GPU name and Metal family, BC support, physical RAM, the memory limit (`os_proc_available_memory` + footprint) and the thermal state. Last Run shows it. Makes every later result self-describing.
 2. **Per-device defaults in the Mac app.** `backend.py` already lists TVs with `devicectl` (`apple_tvs`, from `hardwareProperties`). Read the model from there, and for the A19 default to Docked, texture cap off and full 3D resolution, keeping today's defaults for the A15. The settings stay changeable.
 3. **Offline pipeline archive for the A19.** On iOS and tvOS the archive is read only on the Metal 4 compiler path (`pso_mtl4`, `DM_PSO_MTL4=1`), which every game except Breath of the Wild leaves off on iOS because each was tested without it (`dm/games/README.md`, `pso_mtl4`). For the A19: build with `--gpu <the TV's architecture>` (from phase 1's log; `g18p` if it matches the iPhone 17) and run with `DM_PSO_MTL4=1`, so the TV doesn't compile pipelines the first time a scene shows. Compare first-run stutters with phase 1. This is likely the biggest smoothness win.

@@ -9,6 +9,7 @@ struct AppleTV: Codable, Identifiable, Hashable {
     let os: String?
     let connected: Bool
     let developer_mode: Bool
+    let chip: String?   // "A15", "A19", or empty for a model the backend does not know (backend.py TV_MODELS)
     var title: String { [name, model].compactMap { $0 }.joined(separator: " · ") }
 }
 
