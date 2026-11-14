@@ -469,7 +469,7 @@ class GameFolder(unittest.TestCase):
 
     def test_new_game_is_not_prepared(self):
         with tempfile.TemporaryDirectory() as folder:
-            self.make(folder, 'Game.nsp', 'cover.png')
+            self.make(folder, 'Game.nsp', '._Game.nsp', 'cover.png')   # ._Game.nsp: macOS's AppleDouble file on an exFAT drive
             game = backend.Game(Path(folder))
             self.assertEqual(game.sources, ['Game.nsp'])
             self.assertFalse(game.prepared)

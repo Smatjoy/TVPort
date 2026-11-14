@@ -214,7 +214,8 @@ class Game:
 
     @property
     def sources(self) -> list:
-        return sorted(p.name for p in self.folder.iterdir() if p.suffix.lower() in SOURCE_SUFFIXES)
+        # `._<name>` is an AppleDouble file, which macOS writes beside each file on an exFAT / FAT drive; the NSP script skips them too (scan_nsps)
+        return sorted(p.name for p in self.folder.iterdir() if p.suffix.lower() in SOURCE_SUFFIXES and not p.name.startswith('._'))
 
     @property
     def package(self) -> Optional[str]:

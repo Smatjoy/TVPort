@@ -31,7 +31,7 @@ Sources: [MacRumors](https://macrumors.com/2026/10/13/new-apple-tv-4k-announced)
 | 3D resolution 75% for Tears of the Kingdom | Last-run advice | GPU time | 100% |
 | Guest memory in a file (`DM_GUEST_FILE`) | `hle_svc.c` `guest_block` | tvOS kills an app at 2,097 MB of footprint | Measure the A19's limit. The file may still be needed, or only for large games |
 | Hold 30 fps when hot (`DM_THERMAL_CAP`) | frame step | The A15 throttles after about 20 minutes | Measure. May never trigger |
-| No offline pipeline archive (`--gpu none`) | `backend.py` `prepare_game` | Not needed for correctness | **Big win to test**: nxnative can build a `g18p` archive on the Mac, so the TV doesn't compile pipelines at first use (the stutter the first time a scene shows) |
+| No offline pipeline archive (`--gpu none`), pipelines through `MTLDevice` (`pso_mtl4` off) | `backend.py` `prepare_game`; profile key `pso_mtl4` | Not needed for correctness; only Breath of the Wild was tested with `pso_mtl4` on iOS | **Big win to test**: nxnative can build a `g18p` archive on the Mac, so the TV doesn't compile pipelines at first use (the stutter the first time a scene shows) |
 | `-mcpu=apple-a15` | `dm/ios/project_tv.yml` | Oldest supported chip | Keep. One build must still run on the A15. Faster code for the A19 is phase 6 at most |
 
 ## Phase 0: set up the Mac (once)
@@ -64,51 +64,36 @@ Keep the checkout where it is: that TVPort.app runs `tvport/backend.py` from it.
 
 Keep your games and `prod.keys` outside the repository. Nothing from a game goes into a commit or a log you share: logs name files and addresses, not content, but check before pasting.
 
-## Phase 1: baseline, A15 settings on the A19 (half a day)
+## Approach: one run per game, then everything on
 
-Pick a game known to play on the A15, so a failure points at the A19 and not the game: **Super Mario Odyssey 1.3.0** first, then **Tears of the Kingdom** (1.4.2 or 1.4.3).
+Repeating a fixed route per setting takes days, so this plan doesn't. Each game gets **one run with the A15 defaults**: 5 to 10 minutes, any path, the frame-rate counter on, then **Last Run**. That run's log is enough to learn what the A19 is (the facts below), and the code changes in phase 3 then turn on everything the A19 can take at once. A run that goes worse than the A15 gets a second look, setting by setting; one that goes better doesn't.
 
-1. Build & Install with the defaults (Handheld, texture cap 512, Frame rate as offered, Hold 30 fps on).
-2. Play 10 minutes of a fixed route: the same save, the same path, the same camera moves. Write the route down; every later test repeats it.
-3. Open **Last Run**, and keep the log: it's in the game's `<title ID>_build` folder, or copy it from the TV with **Last Run**.
+## Phase 1: one baseline run per game (Odyssey 1.4.1 first)
 
-Record (template in "Results" below):
+Odyssey first, because it plays on the A15, so a failure points at the A19. The local update is `v393216`, which is **1.4.1** (display version and all three build IDs match the profile); TVPort's README said 1.3.0. Then Tears of the Kingdom 1.4.2.
 
-- **Device line:** search the log for `BC textures`. If it says "this GPU has no BC formats … storing them decompressed", the A19 is not detected as BC-capable: that's a bug to fix first. If the line is missing, BC is native.
-- **Memory:** the `memory up to frame` lines (resident MB, GPU allocated) and `headroom to the system memory limit`. Headroom + footprint at the same moment is the A19's per-app limit. On the A15 it was 2,097 MB.
-- **Guest file:** `guest memory: … MB backed by a file`.
-- **Frame rate:** the `[nvn] on-screen up to frame` lines: frames shown, dropped, p99 frame time, and footprint. Plus the fps counter, and the stutters you notice on the route.
-- **Heat:** minutes until the first `[nvn] thermal state` line, if any (the frame step then holds 30 fps).
-- **tvOS kills:** Last Run names a `per-process-limit` JetsamEvent if tvOS ended the game.
+Build & Install with the defaults (Handheld, Medium texture detail 512, Frame rate as offered, Hold 30 fps on), play 5 to 10 minutes, press **Last Run**. Claude reads the log from `<title ID>_build` and records:
 
-Pass: the game plays as on the A15 or better, and you know the A19's memory limit and BC state.
+- **BC:** a log line "this GPU has no BC formats … storing them decompressed" means the A19 isn't detected as BC-capable: a bug to fix first. No such line: BC is native.
+- **Memory limit:** `headroom to the system memory limit` + footprint at the same moment. On the A15 it was 2,097 MB.
+- **GPU architecture:** the name Metal gives the TV's GPU (is it `g18p`, the iPhone 17's?), which decides the pipeline archive.
+- **Frame rate:** the `[nvn] on-screen up to frame` lines (shown, dropped, p99), and what you saw.
+- **Heat:** whether a `[nvn] thermal state` line came, and when.
+- **Kills:** a `per-process-limit` JetsamEvent in Last Run.
 
-## Phase 2: take the A15 workarounds off, one at a time (1 to 2 days)
+## Phase 2: (folded into phase 3)
 
-Change one thing per run, on the same route, and record each.
-
-| Run | Change | How | Watch |
-|---|---|---|---|
-| 2a | Texture cap off | Texture detail: highest (or `DM_BC_MAX_DIM=0`) | Sharper textures; GPU allocated and footprint |
-| 2b | Docked | Mode: Docked | 1080p; fps; memory |
-| 2c | Full 3D resolution | 3D resolution: Full (TotK, BotW) | fps in heavy areas |
-| 2d | 60 fps | Frame rate: 60 (games with a frame step) | Holds 60? Long frames? |
-| 2e | Thermal cap off | Hold 30 fps when hot: off | Clocks drop when hot regardless; does the game stay smooth over 30 minutes? |
-| 2f | Guest memory anonymous | `DM_GUEST_FILE=0` (see below) | Only if phase 1's limit is far above the game's need: faster loads if the file was paging |
-
-How to set a switch the Mac app has no control for: add it to the env file the build writes (`<title ID>_build/tvport-env.txt`, from `write_env` in `backend.py`). The app reads it at launch. Phase 3 turns the useful ones into settings.
-
-Pass: a table of which workarounds the A19 still needs, per game.
+The one-at-a-time runs are dropped. Phase 1's facts decide each A15 workaround directly: BC native makes the texture cap do nothing; the memory limit decides Docked, full 3D resolution and the guest file; the GPU architecture decides the archive. If a phase 3 build plays worse than phase 1, its settings come off one at a time until it doesn't.
 
 ## Phase 3: code changes for the A19 (work with Claude on the `a19` branch)
 
-Each item is a small change, landed and tested one at a time:
+Landed together in one build once phase 1's facts are in, and checked with one run per game:
 
 1. **Device report at launch.** One log line with the model (`hw.machine`), GPU name and Metal family, BC support, physical RAM, the memory limit (`os_proc_available_memory` + footprint) and the thermal state. Last Run shows it. Makes every later result self-describing.
 2. **Per-device defaults in the Mac app.** `backend.py` already lists TVs with `devicectl` (`apple_tvs`, from `hardwareProperties`). Read the model from there, and for the A19 default to Docked, texture cap off and full 3D resolution, keeping today's defaults for the A15. The settings stay changeable.
-3. **Offline pipeline archive for the A19.** Pass `--gpu g18p` instead of `--gpu none` when the TV is an A19 (`prepare_game`). Check that tvOS loads an archive made for iOS (the Metal libraries already are iOS ones). Measure stutters on the first run of the route with and without it. This is likely the biggest smoothness win.
+3. **Offline pipeline archive for the A19.** On iOS and tvOS the archive is read only on the Metal 4 compiler path (`pso_mtl4`, `DM_PSO_MTL4=1`), which every game except Breath of the Wild leaves off on iOS because each was tested without it (`dm/games/README.md`, `pso_mtl4`). For the A19: build with `--gpu <the TV's architecture>` (from phase 1's log; `g18p` if it matches the iPhone 17) and run with `DM_PSO_MTL4=1`, so the TV doesn't compile pipelines the first time a scene shows. Compare first-run stutters with phase 1. This is likely the biggest smoothness win.
 4. **Guest file only when needed.** If phase 1 shows a much higher limit, turn `DM_GUEST_FILE` on only when the game's memory pool doesn't fit the room (upstream already does exactly this on iOS: `guest_file_wanted`).
-5. **Settings for what phase 2 found useful** (for example memory-file off, thermal cap) in the Mac app, shown only on the devices where they matter.
+5. **Settings for what phase 1 showed matters** (for example memory-file off, thermal cap) in the Mac app, shown only on the devices where they matter.
 
 ## Phase 4: quality on a 4K TV (after phase 3)
 
@@ -158,13 +143,23 @@ To install without the Mac each time, TVPort needs an **Export IPA** option: an 
 | TVPort Python | Made by the app's Setup at first start |
 | Apple TV (A19) | Paired and connected: Apple TV 4K (4th generation), `AppleTV18,1`, chip ID 0x8150, tvOS 27.2.1, developer mode on. TVPort's `backend.py devices` lists it |
 
+### Phase 1 findings (Odyssey 1.4.1, 2026-11-15)
+
+Built Docked with the texture cap off (not the A15 defaults), played the first two kingdoms for 8.7 minutes. It played without a kill or a hitch other than the two below.
+
+- **50 fps, not 60:** every on-screen window has p99 exactly 20.00 ms and the display link ticks once per 20 ms: the TV output is 50 Hz, while the game's vsync runs at 60 Hz. TVPort never asks tvOS for a refresh rate. Fix: ask for 60 Hz with `AVDisplayManager.preferredDisplayCriteria` (works when Match Content > Match Frame Rate is on), or set Settings > Video and Audio > Format to a 60 Hz mode.
+- **Shader stutter:** 24.8 s of pipeline compiles on the submit thread in 8.7 minutes, worst 2.8 s in one 300-frame window (entering a new kingdom). The pipeline archive (phase 3 item 3) is the fix; the bundled list of pipelines seen (`tvport-shaders.tsv`) helps from the next build on.
+- **900p:** the game's own docked resolution (1600×900). Higher is phase 4 work.
+- **BC is native**, the texture cap does nothing on the A19. Peak footprint 1,662 MiB with the guest memory in a file; the memory limit isn't logged (phase 3 item 1).
+- **Heat:** thermal state 0 for the whole run.
+
 ### Runs
 
 One row per run. Keep the logs. Put finished results in the game's note (`dm/games/<title ID>/README.md`) and TVPort's tested-games table (`README.md`).
 
 | Date | Branch / commit | Game, version | Mode | Tex cap | 3D res | FPS target | Avg fps | Long frames on route | Peak footprint MB | Limit MB | BC native? | Minutes to hot | Notes |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| | | | | | | | | | | | | | |
+| 2026-11-15 | `a19` `f4a25afc`+`._` fix | Odyssey 1.4.1 | Docked | Off (0) | (game's own, 1600×900) | 60 (game) | 50 (TV output at 50 Hz; p99 20.00 ms) | 608 frames dropped in 8.7 min; 24.8 s of pipeline compiles on the submit thread, up to 2.8 s per 300 frames | 1,662 | Not logged (no kill) | Yes (no "no BC formats" line) | Never: thermal 0 throughout | Metal device "Apple A19 GPU"; guest memory 4,096 MB in a file; GPU allocated up to 2,697 MB; pipelines through `MTLDevice`, no archive |
 
 Device: Apple TV 4K (2026, A19, `AppleTV18,1`), tvOS 27.2.1, RAM ____ (from the device report), TV ____ (4K/HDR/refresh rate), controller ____.
 
