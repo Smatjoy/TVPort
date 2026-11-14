@@ -142,13 +142,31 @@ To install without the Mac each time, TVPort needs an **Export IPA** option: an 
 
 ## Results
 
+### Phase 0 (2026-11-14, `a19` at `3ed49818`)
+
+| Check | Result |
+|---|---|
+| macOS | 27.2.1, Apple silicon |
+| Xcode | 27.2 (27B52) |
+| tvOS / iOS platforms | SDK 27.2 / SDK 27.2 |
+| Metal toolchain | 32023.922 (27B47), installed |
+| xcodegen | 2.46.0 |
+| zstd, glslang | zstd present; glslang 16.6.0 installed with Homebrew (was missing) |
+| .NET SDK | 10.0.403 (`~/.dotnet`) |
+| Apple ID | Free team signed in to Xcode |
+| TVPort.app | Built from this checkout, Release, no errors; backend tests 44/44 pass |
+| TVPort Python | Made by the app's Setup at first start |
+| Apple TV (A19) | Paired and connected: Apple TV 4K (4th generation), `AppleTV18,1`, chip ID 0x8150, tvOS 27.2.1, developer mode on. TVPort's `backend.py devices` lists it |
+
+### Runs
+
 One row per run. Keep the logs. Put finished results in the game's note (`dm/games/<title ID>/README.md`) and TVPort's tested-games table (`README.md`).
 
 | Date | Branch / commit | Game, version | Mode | Tex cap | 3D res | FPS target | Avg fps | Long frames on route | Peak footprint MB | Limit MB | BC native? | Minutes to hot | Notes |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | | | | | | | | | | | | | | |
 
-Device: Apple TV 4K (2026, A19), tvOS ____, RAM ____ (from the device report), TV ____ (4K/HDR/refresh rate), controller ____.
+Device: Apple TV 4K (2026, A19, `AppleTV18,1`), tvOS 27.2.1, RAM ____ (from the device report), TV ____ (4K/HDR/refresh rate), controller ____.
 
 ## Working with Claude on this
 
