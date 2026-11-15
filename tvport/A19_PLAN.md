@@ -89,7 +89,7 @@ The one-at-a-time runs are dropped. Phase 1's facts decide each A15 workaround d
 
 Landed together in one build once phase 1's facts are in, and checked with one run per game:
 
-**Status (2026-11-15): items 1, 2, 3 and the 60 Hz request are in code, not yet run on the TV.** Items 4 and 5 wait for the device report's memory limit.
+**Status (2026-11-15, after run 3): 60 Hz and items 1, 2 and 3 work on the TV.** Run 2 found the archive built for iOS, which tvOS refuses. With the tvOS archive (`pso_offline.py --platform tvos`), run 3 compiled no base at launch. The memory limit is 2,098 MB, the same as the A15's, so item 4 stays as it is (the guest file is needed).
 
 - **60 Hz** (from phase 1): tvOS's `front_screen_match` in `dm/ios/Sources/front_ios.m` asks for a display mode at the game's rate through `AVDisplayManager.preferredDisplayCriteria` (30 fps asks for 60 Hz). tvOS follows it only with Settings > Video and Audio > Match Content > Match Frame Rate on; the log says which. `DM_SCREEN_MATCH=0` turns it off.
 - **Item 1:** `front_ios_device_report` logs `front end: device …`: model, GPU name and architecture, Metal family, BC, RAM, memory limit (available + footprint), thermal state.
@@ -160,6 +160,22 @@ Built Docked with the texture cap off (not the A15 defaults), played the first t
 - **BC is native**, the texture cap does nothing on the A19. Peak footprint 1,662 MiB with the guest memory in a file; the memory limit isn't logged (phase 3 item 1).
 - **Heat:** thermal state 0 for the whole run.
 
+### Phase 3 run 2 findings (Odyssey 1.4.1, 2026-11-15, `cd25cea7`)
+
+- **60 Hz works:** `asked tvOS for a 60 Hz display mode … (the screen runs at 50 Hz)`, then `display mode switch ended, the screen runs at 60 Hz`; p99 16.67 ms in most windows.
+- **Device report:** `AppleTV18,1`, `applegpu_g18p`, Metal family Apple10, BC native, RAM 8,055 MB, **memory limit 2,098 MB**, the same as the A15. The guest file stays.
+- **Archive refused:** `this system cannot open …/pso/applegpu_g18p.mtl4a (deployment target … is not compatible with current OS)`. The archive was built for iOS (`platform ios 27.0`), and tvOS opens only a tvOS one. The TV then built all 20,740 bases itself in 557 s, reaching thermal state 3 at 108 s and cooling back to 1 by 718 s. Those bases are now in the TV's own archive (`Library/Caches/pso_archive`), so the next launch doesn't do this again. Fixed in `pso_offline.py` (`--platform tvos`) and `build_ipa.sh`; a three-pipeline tvOS archive built from the iOS libraries without complaint ([reference entry](../docs/reference/shaders.md#offline-pipeline-archive-made-for-ios-on-an-apple-tv)).
+- **Stutter left in play:** pipelines outside the shader pair list (`pulling base not made yet`, up to 1.6 s in one 300-frame window, 6.4 s in all over 2.75 minutes of play). These are the ones the pair list doesn't predict. The game recorded 343 of them (`pso_user.tsv`, 3,183 lines). The TV warms them at launch, and TVPort puts them into the next build.
+
+### Phase 3 run 3 findings (Odyssey 1.4.1, 2026-11-15, tvOS archive)
+
+- **Archive opens:** `pipeline archive bundled with the app: …/applegpu_g18p.mtl4a, 815.1 MB, opened in 659.4 ms`, and the archive `holds the bases of every shader pair (16 of 16 probed bases found)`. The launch warm-up took 11.9 s for 3,183 lines, 1,488 bases from the archive and **0 compiled**.
+- **Stutter:** 1.9 s of pipeline work on the submit thread in 6.6 minutes of play, including a new kingdom, and at most 267 ms in any 300-frame window (run 1: 24.8 s and 2.8 s). The thermal state never changed.
+
+### ExeFS mods (2026-11-15)
+
+Community code patches (`.pchtxt`, `.ips`) are applied on the Mac before the rewrite (`dm/tools/exefs_mods.py`, the NSP script's `--mods`; TVPort passes a game's `mods` folder beside its NSPs and prepares the game again when that folder changes). A cheat can't write code on tvOS; a patch made here becomes part of the signed app. Installed for Odyssey 1.4.1: `[1920x1080 v1.4.1]` (28 patches) and `[Improved Level of Detail v1.4.1]` (4 patches: LOD bias, anisotropic filtering, FXAA off). The modded `main` rewrites to the same fixups and changed words as the original, and differs from it only in the 71 bytes the mods write. Not yet run on the TV. Upstream's proposal for the same feature: seedds/nxnative#2294.
+
 ### Runs
 
 One row per run. Keep the logs. Put finished results in the game's note (`dm/games/<title ID>/README.md`) and TVPort's tested-games table (`README.md`).
@@ -167,8 +183,10 @@ One row per run. Keep the logs. Put finished results in the game's note (`dm/gam
 | Date | Branch / commit | Game, version | Mode | Tex cap | 3D res | FPS target | Avg fps | Long frames on route | Peak footprint MB | Limit MB | BC native? | Minutes to hot | Notes |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | 2026-11-15 | `a19` `f4a25afc`+`._` fix | Odyssey 1.4.1 | Docked | Off (0) | (game's own, 1600×900) | 60 (game) | 50 (TV output at 50 Hz; p99 20.00 ms) | 608 frames dropped in 8.7 min; 24.8 s of pipeline compiles on the submit thread, up to 2.8 s per 300 frames | 1,662 | Not logged (no kill) | Yes (no "no BC formats" line) | Never: thermal 0 throughout | Metal device "Apple A19 GPU"; guest memory 4,096 MB in a file; GPU allocated up to 2,697 MB; pipelines through `MTLDevice`, no archive |
+| 2026-11-15 | `a19` `cd25cea7` | Odyssey 1.4.1 | Docked | Off (0) | (game's own, 1600×900) | 60 (game) | 60 (screen switched from 50 to 60 Hz; p99 16.67 ms, some windows 33.33) | 90 frames dropped in 2.75 min of play; 6.4 s on the submit thread, up to 1.6 s per 300 frames, all pipelines outside the pair list | 1,386 | 2,098 | Yes | Thermal 3 at 108 s during the TV's own 557 s prebuild (archive refused: made for iOS); back to 1 by 718 s | Rumble works; `pso_mtl4` on; device report logged |
+| 2026-11-15 | `a19` + tvOS archive | Odyssey 1.4.1 | Docked | Off (0) | (game's own, 1600×900) | 60 (game) | 60 (72 of 79 windows p99 16.67 ms) | 203 frames dropped in 6.6 min with a new kingdom; 1.9 s on the submit thread, at most 267 ms per 300 frames | 1,838 | 2,098 | Yes | Never: no thermal change | Archive opened (815 MB, 0.66 s); 0 bases compiled at launch |
 
-Device: Apple TV 4K (2026, A19, `AppleTV18,1`), tvOS 27.2.1, RAM ____ (from the device report), TV ____ (4K/HDR/refresh rate), controller ____.
+Device: Apple TV 4K (2026, A19, `AppleTV18,1`), tvOS 27.2.1, RAM 8,055 MB, memory limit 2,098 MB (device report), TV ____ (4K/HDR/refresh rate), controller ____.
 
 ## Working with Claude on this
 

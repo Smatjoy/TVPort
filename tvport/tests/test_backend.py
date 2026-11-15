@@ -503,6 +503,19 @@ class GameFolder(unittest.TestCase):
             self.make(folder, '0100000000010000_build/patched_v1/main.patched.bin', '0100000000010000_build/extract/v1/RomFS.img', '0100000000010000_build/shader/ios/b-000000000000/inputs.tsv')
             self.assertFalse(backend.Game(Path(folder)).prepared)
 
+    def test_mods_folder_and_its_digest(self):
+        with tempfile.TemporaryDirectory() as folder:
+            self.make(folder, 'Game.nsp')
+            game = backend.Game(Path(folder))
+            self.assertIsNone(game.mods); self.assertEqual(game.mods_digest(), '')
+            self.make(folder, 'mods/[1080p]/exefs/a.pchtxt', 'mods/[1080p]/exefs/._a.pchtxt')
+            self.assertEqual(game.sources, ['Game.nsp'])   # the mods are not games
+            first = game.mods_digest(); self.assertTrue(first)
+            (Path(folder) / 'mods/[1080p]/exefs/._a.pchtxt').write_text('AppleDouble')   # macOS's own files do not count
+            self.assertEqual(game.mods_digest(), first)
+            (Path(folder) / 'mods/[1080p]/exefs/a.pchtxt').write_text('@enabled')
+            self.assertNotEqual(game.mods_digest(), first)
+
     def test_new_bundle_id_comes_from_team_and_title(self):
         with tempfile.TemporaryDirectory() as folder:
             self.make(folder, '0100ABCD00000000_build/x')

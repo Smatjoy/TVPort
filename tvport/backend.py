@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 import plistlib
@@ -267,6 +268,22 @@ class Game:
     @property
     def prepared(self) -> bool:
         return bool(self.package and self.romfs and self.shaders)
+
+    @property
+    def mods(self) -> Optional[Path]:
+        """The game's ExeFS mods: a mods folder beside its NSPs, one folder per mod with an exefs/ folder of .pchtxt or .ips files, as mod sites share them. A mod whose folder
+        name starts with '-' is off. The engine applies those made for the packed version to the game's code while it rewrites it (dm/tools/exefs_mods.py)."""
+        folder = self.folder / 'mods'
+        return folder if folder.is_dir() else None
+
+    def mods_digest(self) -> str:
+        """What the mods folder holds, so a change to it prepares the game again: '' without one"""
+        if not self.mods:
+            return ''
+        h = hashlib.sha256()
+        for f in sorted(p for p in self.mods.rglob('*') if p.is_file() and not p.name.startswith('._') and p.name != '.DS_Store'):
+            h.update(str(f.relative_to(self.mods)).encode() + b'\0' + hashlib.sha256(f.read_bytes()).digest())
+        return h.hexdigest()
 
     @property
     def state_file(self) -> Optional[Path]:
@@ -673,8 +690,13 @@ def prepare_game(game: Game, keys: Optional[Path], team: str, python: str) -> Ga
     command = [python, REPO / 'scripts/build_ipa_from_nsp.py', game.folder, '-k', keys, '--prepare-xcode', '--keep-extracted', '--gpu', 'none', '--romfs', 'separate', '--allow-other-metal', '--progress', 'lines']
     if team:
         command += ['--team-id', team]
+    if game.mods:
+        command += ['--mods', game.mods]
+        emit('log', line=f'Mods from {game.mods} go into the game\'s code.')
+    mods = game.mods_digest()
     stream(command, cwd=REPO)
     game = Game(game.folder)
+    game.save_state(mods=mods)
     if not game.prepared:
         raise Failure('The engine finished without shaders or game files for this game. See the log above.')
     return game
@@ -783,7 +805,7 @@ def cmd_build(args) -> None:
         prune_engines(REPO)
     python = engine_python()
     os.environ['PATH'] = os.pathsep.join([str(Path(python).parent), os.environ.get('PATH', '')])   # the engine's own `python3` calls (build_ipa.sh) take this one, not the system's 3.9
-    if not game.prepared:
+    if not game.prepared or game.mods_digest() != game.state().get('mods', ''):   # a mod added, changed or removed: the code is rewritten again (the rest is reused)
         game = prepare_game(game, args.keys, team, python)
     bundle = game.bundle_id(team)
     if args.device:
