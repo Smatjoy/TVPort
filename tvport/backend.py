@@ -286,6 +286,25 @@ class Game:
         return h.hexdigest()
 
     @property
+    def cheats(self) -> Path:
+        """The game's cheat codes: a cheats folder beside its NSPs, holding the Atmosphère <build ID>.txt files cheat sites share (flat, or the atmosphere/contents tree), and
+        <build ID>.enabled, the cheats turned on, one name per line, as the engine keeps it (dm/host/hle_cheats.c). It may not exist yet."""
+        return self.folder / 'cheats'
+
+    def module_builds(self) -> dict:
+        """{module: build ID in upper-case hex} of the packed version's modules, from their NSO headers (no decompression needed: the ID is in the header)"""
+        exefs = self.extract / 'ExeFS' if self.extract else None
+        out = {}
+        if exefs and exefs.is_dir():
+            for f in sorted(exefs.iterdir()):
+                if f.is_file() and not f.name.startswith('.') and f.suffix == '':
+                    with f.open('rb') as nso:
+                        head = nso.read(0x60)
+                    if head[:4] == b'NSO0':
+                        out[f.name] = head[0x40:0x60].hex().upper()
+        return out
+
+    @property
     def state_file(self) -> Optional[Path]:
         return self.build / 'tvport.json' if self.build else None
 
@@ -497,6 +516,192 @@ def cmd_inspect(args) -> None:
                       'keys': str(find_keys(game) or '') or None, **backup_info(latest_backup(game))}))
 
 
+MOD_FILES = ('.pchtxt', '.ips')
+MOD_SIZE = re.compile(r'(?<!\d)(\d{3,4})\s*[x×]\s*(\d{3,4})(?!\d)')   # "[1920x1080 v1.4.1]": the size a resolution mod names
+
+
+def build_named(name_bid: str, build: str) -> bool:
+    """A mod file's build ID (any length from 16 hex digits up; trailing zeros as Atmosphère pads them) names this module's build, as dm/tools/exefs_mods.py matches it"""
+    want = name_bid.strip().upper().rstrip('0')
+    return len(name_bid.strip()) >= 16 and bool(want) and build.upper().startswith(want)
+
+
+def mod_file_build(f: Path) -> str:
+    """The build ID a .pchtxt (its @nsobid- line) or an .ips (its file name) is made for"""
+    if f.suffix.lower() == '.ips':
+        return f.stem
+    for line in f.read_text(encoding='utf-8', errors='replace').splitlines():
+        if line.strip().lower().startswith('@nsobid-'):
+            return line.strip().split()[0][8:]
+    return ''
+
+
+def mod_entries(game: Game) -> list:
+    """Each mod in the mods folder (one folder per mod; '-' in front of the name turns it off) and whether it is made for the packed version"""
+    root = game.mods
+    if not root:
+        return []
+    builds = game.module_builds()
+    out = []
+    for d in sorted((p for p in root.iterdir() if p.is_dir() and not p.name.startswith('.')), key=lambda p: p.name.lstrip('-').lower()):
+        files = [f for f in d.rglob('*') if f.is_file() and not f.name.startswith('._') and f.suffix.lower() in MOD_FILES]
+        made_for = [mod_file_build(f) for f in files]
+        applies = any(build_named(b, have) for b in made_for for have in builds.values())
+        name = d.name.lstrip('-')
+        size = MOD_SIZE.search(name)
+        out.append({'name': name, 'folder': d.name, 'on': not d.name.startswith('-'), 'files': len(files),
+                    'state': 'applies' if applies else 'other-version' if files else 'no-code-patches',
+                    'romfs': any(p.is_dir() and p.name.lower() == 'romfs' for p in d.rglob('*')),
+                    'resolution': f'{size[1]}x{size[2]}' if size else None})
+    return out
+
+
+def mod_resolution(mods: list) -> Optional[str]:
+    """The size an enabled resolution mod made for this version names, e.g. 1920x1080"""
+    return next((m['resolution'] for m in mods if m['on'] and m['state'] == 'applies' and m['resolution']), None)
+
+
+CHEAT_HEADER = re.compile(r'^\s*([\[{])(.*?)([\]}])')
+CODE_WORD = re.compile(r'^[0-9A-Fa-f]{8}$')
+
+
+def read_cheats(text: str) -> list:
+    """[(name, master)] of an Atmosphère cheat file's cheats, in file order: a [Name] cheat, a {Name} master code; an entry without code words is a label (a credits line,
+    EdiZon's section markers), which the engine never runs (hle_cheats.c)"""
+    out, current, words = [], None, False
+    for raw in text.splitlines():
+        header = CHEAT_HEADER.match(raw)
+        if header:
+            if current and words:
+                out.append(current)
+            current, words = (header[2].strip(), header[1] == '{'), False
+            raw = raw[header.end():]
+        if current and any(CODE_WORD.match(w) for w in raw.split()):
+            words = True
+    if current and words:
+        out.append(current)
+    return out
+
+
+def cheat_keys(cheats: list) -> list:
+    """The key of each cheat in <build>.enabled: its name, 'Name #2' for the second entry of a name, and so on (hle_cheats.c)"""
+    seen, keys = {}, []
+    for name, _ in cheats:
+        n = seen.get(name.lower(), 0)
+        seen[name.lower()] = n + 1
+        keys.append(name if n == 0 else f'{name} #{n + 1}')
+    return keys
+
+
+def cheat_file(game: Game) -> Optional[Path]:
+    """This version's cheat file: <first 16 hex digits of main's build ID>.txt anywhere in the cheats folder"""
+    build = game.module_builds().get('main', '')[:16]
+    if not build or not game.cheats.is_dir():
+        return None
+    return next((f for f in sorted(game.cheats.rglob('*.txt')) if not f.name.startswith('._') and f.stem.upper()[:16] == build), None)
+
+
+def cheat_entries(game: Game) -> dict:
+    """This version's cheats with their saved switches, and the other versions' files in the folder"""
+    build = game.module_builds().get('main', '')[:16]
+    f = cheat_file(game)
+    enabled_file = game.cheats / f'{build}.enabled'
+    on = {line.strip().lower() for line in enabled_file.read_text(errors='replace').splitlines() if line.strip()} if build and enabled_file.is_file() else set()
+    cheats = read_cheats(f.read_text(encoding='utf-8', errors='replace')) if f else []
+    others = sorted({p.stem.upper()[:16] for p in game.cheats.rglob('*.txt') if not p.name.startswith('._') and re.fullmatch(r'[0-9A-Fa-f]{16,}', p.stem)} - {build}) if game.cheats.is_dir() else []
+    return {'build': build, 'file': str(f) if f else None, 'others': others,
+            'cheats': [{'name': key, 'master': master, 'on': master or key.lower() in on} for (name, master), key in zip(cheats, cheat_keys(cheats))]}
+
+
+def cmd_extras(args) -> None:
+    """The game's mods and cheats, for the app's Mods & Cheats section"""
+    game = Game(args.folder)
+    mods = mod_entries(game) if game.build else []
+    print(json.dumps({'mods': mods, 'mod_resolution': mod_resolution(mods), 'mods_folder': str(game.folder / 'mods'), 'cheats_folder': str(game.cheats),
+                      'cheats': cheat_entries(game) if game.build else {'build': '', 'file': None, 'others': [], 'cheats': []}}))
+
+
+def cmd_mod(args) -> None:
+    """Turns a mod on or off (its folder name with or without '-' in front), or copies a mod folder into the game's mods folder"""
+    game = Game(args.folder)
+    mods = game.folder / 'mods'
+    if args.add:
+        source = args.add.expanduser().resolve()
+        if not source.is_dir():
+            raise Failure(f'{source} is not a folder')
+        if source.name.lower() == 'exefs':   # the exefs folder itself was picked: the mod is its parent
+            source = source.parent
+        inner = [p for p in source.iterdir() if p.is_dir() and any(q.name.lower() == 'exefs' for q in p.iterdir() if q.is_dir())]
+        picked = inner if not any(p.name.lower() == 'exefs' for p in source.iterdir() if p.is_dir()) and inner else [source]   # a folder of several mods adds each
+        if not any(f.suffix.lower() in MOD_FILES for p in picked for f in p.rglob('*') if f.is_file()):
+            raise Failure(f'{source.name} has no .pchtxt or .ips files: TVPort applies code mods (an exefs folder) only')
+        mods.mkdir(exist_ok=True)
+        for p in picked:
+            target = mods / p.name
+            if target.exists() or (mods / ('-' + p.name)).exists():
+                raise Failure(f'A mod named {p.name} is already there')
+            shutil.copytree(p, target, ignore=shutil.ignore_patterns('._*', '.DS_Store'))
+        print(json.dumps({'added': [p.name for p in picked]}))
+        return
+    current = next((d for d in (mods / args.name, mods / ('-' + args.name)) if d.is_dir()), None)
+    if not current:
+        raise Failure(f'No mod named {args.name}')
+    target = mods / (args.name if args.on else '-' + args.name)
+    if current != target:
+        current.rename(target)
+    print(json.dumps({'name': args.name, 'on': args.on}))
+
+
+def cmd_cheat(args) -> None:
+    """Turns cheats on or off (<build>.enabled in the cheats folder), or copies a cheat file in as this version's"""
+    game = Game(args.folder)
+    build = game.module_builds().get('main', '')[:16]
+    if not build:
+        raise Failure('Build the game once first: its version decides which cheat file it reads')
+    if args.add:
+        source = args.add.expanduser().resolve()
+        if not read_cheats(source.read_text(encoding='utf-8', errors='replace')):
+            raise Failure(f'{source.name} has no cheats in the Atmosphère format ([Name] lines followed by code words)')
+        named = re.fullmatch(r'[0-9A-Fa-f]{16,}', source.stem)
+        if named and source.stem.upper()[:16] != build and not args.any_build:
+            raise Failure(f'{source.name} is for another version of the game (this one is {build}). Its addresses would be wrong.')
+        game.cheats.mkdir(exist_ok=True)
+        target = game.cheats / f'{build}.txt'
+        if target.exists():
+            target.replace(target.with_suffix('.txt.bak'))
+        shutil.copy2(source, target)
+        print(json.dumps({'added': str(target)}))
+        return
+    entries = cheat_entries(game)
+    keys = [c['name'] for c in entries['cheats'] if not c['master']]
+    on = {c['name'] for c in entries['cheats'] if c['on'] and not c['master']}
+    for name in args.name:
+        if name not in keys:
+            raise Failure(f'No cheat named {name}')
+        (on.add if args.on else on.discard)(name)
+    game.cheats.mkdir(exist_ok=True)
+    (game.cheats / f'{build}.enabled').write_text(''.join(k + '\n' for k in keys if k in on))
+    print(json.dumps({'on': sorted(on)}))
+
+
+def stage_cheats(game: Game) -> Optional[Path]:
+    """This version's cheat file and its switches, copied for the app (build_ipa.sh DM_CHEATS_DIR → dm/cheats in the bundle; main.m puts them in Library/Caches/cheats);
+    None when no cheat is on, so a build without cheats carries none and the engine maps nothing for them"""
+    f = cheat_file(game)
+    entries = cheat_entries(game)
+    if not f or not any(c['on'] and not c['master'] for c in entries['cheats']):
+        return None
+    out = game.build / 'tvport-cheats'
+    shutil.rmtree(out, ignore_errors=True)
+    out.mkdir()
+    build = entries['build']
+    shutil.copy2(f, out / f'{build}.txt')
+    for origin, name in ((game.cheats / f'{build}.enabled', f'{build}.enabled'), (f.with_name(f'{f.stem}.meta.tsv'), f'{build}.meta.tsv'), (game.cheats / f'{build}.values', f'{build}.values')):
+        if origin.is_file():
+            shutil.copy2(origin, out / name)
+    return out
+
+
 def cmd_preview(args) -> None:
     result = run(['xcrun', 'swift', REPO / 'dm/ios/tools/tv_icon.swift', args.art, '--preview', args.out])
     if result.returncode:
@@ -644,7 +849,7 @@ def restore_saves(game: Game, device: str, bundle: str) -> int:
     return len(names)
 
 
-def write_env(game: Game, mode: str, texture_cap: int, players: str = '', render_scale: float = 1.0, thermal_cap: bool = True, fps_target: int = 0, archive: bool = False) -> Path:
+def write_env(game: Game, mode: str, texture_cap: int, players: str = '', render_scale: float = 1.0, thermal_cap: bool = True, fps_target: int = 0, archive: bool = False, upscale: bool = False) -> Path:
     """The switches the app reads at launch (main.m, dm/env.txt)."""
     path = game.build / 'tvport-env.txt'
     lines = ['# Written by TVPort', f'DM_OPMODE={0 if mode == "handheld" else 1}', f'DM_BC_MAX_DIM={texture_cap}']
@@ -654,6 +859,8 @@ def write_env(game: Game, mode: str, texture_cap: int, players: str = '', render
         lines.append(f'DM_FPS_TARGET={fps_target}')
     if not thermal_cap:   # the frame step keeps its cap when the TV is hot; tvOS lowers the clocks then all the same (docs/reference/frame-rate.md)
         lines.append('DM_THERMAL_CAP=0')
+    if upscale:   # MetalFX's spatial scaler where the TV shows the picture larger than the game draws it (nvn_mtl.m fx_encode), in place of the bilinear present
+        lines.append('DM_PRESENT_UPSCALE=metalfx')
     if archive:   # the Metal 4 pipeline path, which reads the pipeline archive bundled with the app (nvn_mtl.m pso_bundle_open)
         lines.append('DM_PSO_MTL4=1')
     if players.strip():
@@ -708,8 +915,13 @@ def generate_project(game: Game, args, team: str, bundle: str, python: str) -> P
     gpu = tv_model(args.device).get('gpu', '')
     env = profile_env(game)
     env.update(GAME=game.title_id, W=str(game.build), PATCHED=str(game.build / f'patched_{game.package}'), ROMFS=str(game.romfs), MSL_IOS=str(game.shaders), AOC='',
-               DM_TVOS='1', DM_COPY_ROMFS='NO', DM_SHOW_FPS='1' if args.fps else '0', DM_ENV_FILE=str(write_env(game, args.mode, args.texture_cap, args.players, args.render_scale, not args.no_thermal_cap, args.fps_target, archive=bool(gpu))), DM_BUNDLE_ID=bundle, DM_TEAM_ID=team,
+               DM_TVOS='1', DM_COPY_ROMFS='NO', DM_SHOW_FPS='1' if args.fps else '0', DM_ENV_FILE=str(write_env(game, args.mode, args.texture_cap, args.players, args.render_scale, not args.no_thermal_cap, args.fps_target, archive=bool(gpu), upscale=args.upscale)), DM_BUNDLE_ID=bundle, DM_TEAM_ID=team,
                DM_XCODE_PROJECT_DIR=str(game.build / 'tvport-xcode'), DM_XCODE_DERIVED_DATA=str(game.build / 'tvport-derived'), FONT_PY=python)
+    cheats = stage_cheats(game)
+    if cheats:   # build_ipa.sh puts them in the bundle as dm/cheats
+        env['DM_CHEATS_DIR'] = str(cheats)
+        on = sum(c['on'] and not c['master'] for c in cheat_entries(game)['cheats'])
+        emit('log', line=f'{on} cheat{"s" if on != 1 else ""} on. Cheats that change the game\'s code work only on a Mac; the Apple TV skips them.')
     env['DM_PSO_GPUS'] = gpu or 'none'   # build_ipa.sh makes the archive for it (minutes the first time; again only when its inputs change)
     if gpu:
         emit('log', line=f'This Apple TV gets a pipeline archive for its GPU ({gpu}), so it does not build pipelines while you play. The first time, this adds a few minutes.')
@@ -776,11 +988,45 @@ def install(game: Game, device: str, bundle: str) -> None:
         raise Failure(result.stderr.strip()[-900:] or 'The install failed')
     stage('Checking the game files on the Apple TV')
     size = game.romfs.stat().st_size
-    if installed_files(device, bundle).get('romfs.img') == size:
+    # The size alone does not show a complete copy: a copy cut off partway can leave romfs.img at its full size with its end (the image's index) never written, which the app
+    # then rejects at every start while each install skipped it (Metroid Prime Remastered, 2026-11-15). So the app's romfs.id goes to the TV as romfs.sent once a copy has
+    # finished, and only an image with a matching mark is kept
+    want = (game.app / 'romfs.id').read_text() if (game.app / 'romfs.id').is_file() else ''
+    if installed_files(device, bundle).get('romfs.img') == size and want and sent_mark(device, bundle) == want:
         emit('log', line='The game files are already on the Apple TV.')
         return
     emit('log', line=f'Sending the game files ({size / 2**30:.1f} GB). This takes a few minutes over the network.')
+    put_sent_mark(device, bundle, '')   # an earlier mark must not outlive a copy cut off now
+    # devicectl's copy skips a file whose size and modification date already match, and a cut off copy has both (the date is the source's), so it would never be replaced.
+    # devicectl cannot delete a file, so a one-byte placeholder goes over it first
+    put_cache_file(device, bundle, 'romfs.img', '\n')
     stream(['xcrun', 'devicectl', 'device', 'copy', 'to', '--device', device, '--domain-type', 'appDataContainer', '--domain-identifier', bundle, '--source', game.romfs, '--destination', f'{CACHES}/romfs.img'])
+    if want:
+        put_sent_mark(device, bundle, want)
+
+
+SENT_MARK = 'romfs.sent'
+
+
+def put_cache_file(device: str, bundle: str, name: str, text: str) -> None:
+    with tempfile.TemporaryDirectory() as folder:
+        source = Path(folder) / name
+        source.write_text(text)
+        result = run(['xcrun', 'devicectl', 'device', 'copy', 'to', '--device', device, '--domain-type', 'appDataContainer', '--domain-identifier', bundle, '--source', source, '--destination', f'{CACHES}/{name}'])
+        if result.returncode:
+            raise Failure(f'{name} could not be written on the Apple TV: ' + (result.stderr.strip()[-600:] or 'devicectl failed'))
+
+
+def put_sent_mark(device: str, bundle: str, text: str) -> None:
+    put_cache_file(device, bundle, SENT_MARK, text)
+
+
+def sent_mark(device: str, bundle: str) -> str:
+    """The romfs.id of the last image copy to the TV that finished ('' when there is none)."""
+    with tempfile.TemporaryDirectory() as folder:
+        mark = Path(folder) / SENT_MARK
+        run(['xcrun', 'devicectl', 'device', 'copy', 'from', '--device', device, '--domain-type', 'appDataContainer', '--domain-identifier', bundle, '--source', f'{CACHES}/{SENT_MARK}', '--destination', mark])
+        return mark.read_text(errors='replace') if mark.is_file() else ''
 
 
 def one_build_at_a_time():
@@ -983,6 +1229,7 @@ def main() -> int:
     build.add_argument('--fps-target', type=int, choices=(0, 30, 60), default=0)   # 0: the profile's
     build.add_argument('--fps', action='store_true')
     build.add_argument('--players', default='')
+    build.add_argument('--upscale', action='store_true', help='MetalFX upscaling to the TV\'s size')
     build.add_argument('--icloud', action='store_true')
     backup = commands.add_parser('backup')
     backup.add_argument('folder', type=Path)
@@ -999,6 +1246,19 @@ def main() -> int:
     diagnose = commands.add_parser('diagnose')
     diagnose.add_argument('--device', required=True)
     diagnose.add_argument('--bundle', required=True)
+    extras = commands.add_parser('extras')
+    extras.add_argument('folder', type=Path)
+    mod = commands.add_parser('mod')
+    mod.add_argument('folder', type=Path)
+    mod.add_argument('--add', type=Path, help='copy this mod folder (or a folder of mods) into the game\'s mods folder')
+    mod.add_argument('--name')
+    mod.add_argument('--on', action=argparse.BooleanOptionalAction, default=True)
+    cheat = commands.add_parser('cheat')
+    cheat.add_argument('folder', type=Path)
+    cheat.add_argument('--add', type=Path, help='copy this cheat file in as this version\'s')
+    cheat.add_argument('--any-build', action='store_true', help='with --add: take a file named after another version\'s build ID')
+    cheat.add_argument('--name', action='append', default=[])
+    cheat.add_argument('--on', action=argparse.BooleanOptionalAction, default=True)
     commands.add_parser('doctor')
     commands.add_parser('setup')
     args = parser.parse_args()
@@ -1009,7 +1269,8 @@ def main() -> int:
                 stage('Unpacking the engine')
             REPO = unpack_engine(HERE, DATA)
         {'devices': cmd_devices, 'inspect': cmd_inspect, 'preview': cmd_preview, 'build': cmd_build, 'backup': cmd_backup, 'launch': cmd_launch, 'diagnose': cmd_diagnose,
-         'doctor': cmd_doctor, 'setup': cmd_setup, 'autobackup': cmd_autobackup}[args.command](args)
+         'doctor': cmd_doctor, 'setup': cmd_setup, 'autobackup': cmd_autobackup,
+         'extras': cmd_extras, 'mod': cmd_mod, 'cheat': cmd_cheat}[args.command](args)
     except Failure as failure:
         if streamed:
             emit('error', message=str(failure))

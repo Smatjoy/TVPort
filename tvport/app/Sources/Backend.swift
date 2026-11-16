@@ -40,6 +40,37 @@ struct GameInfo: Codable {
     let last_backup_place: String?
 }
 
+/// The game's mods and cheats (backend.py extras).
+struct Extras: Codable {
+    struct Mod: Codable, Identifiable, Hashable {
+        let name: String
+        let folder: String
+        let on: Bool
+        let files: Int
+        let state: String        // applies, other-version, no-code-patches
+        let romfs: Bool
+        let resolution: String?  // "1920x1080", from the mod's name
+        var id: String { name }
+    }
+    struct Cheat: Codable, Identifiable, Hashable {
+        let name: String
+        let master: Bool
+        let on: Bool
+        var id: String { name }
+    }
+    struct Cheats: Codable {
+        let build: String
+        let file: String?
+        let others: [String]
+        let cheats: [Cheat]
+    }
+    let mods: [Mod]
+    let mod_resolution: String?
+    let mods_folder: String
+    let cheats_folder: String
+    let cheats: Cheats
+}
+
 struct SaveBackup: Codable {
     let files: Int
     let folder: String?

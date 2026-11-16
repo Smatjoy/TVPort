@@ -4,10 +4,11 @@ import SwiftUI
 enum RenderMode: String, Codable, CaseIterable, Identifiable {
     case handheld, docked
     var id: String { rawValue }
-    var label: String { self == .handheld ? "Handheld (720p)" : "Docked (900p)" }
+    /// The Switch's two performance modes. Each game picks its own resolution for them (Odyssey: 1600×900 docked, 1280×720 handheld); a resolution mod changes that.
+    var label: String { self == .handheld ? "Handheld" : "Docked" }
     var note: String {
-        self == .handheld ? "Lighter on the GPU and on memory. Some games lose motion controls in this mode."
-                          : "Sharper. The A15 can't always hold it, and it leaves less memory there; the A19 can."
+        self == .handheld ? "The Switch's portable mode: the game draws at its handheld size (often 720p). Lighter on the GPU and on memory. Some games lose motion controls in this mode."
+                          : "The Switch's TV mode: the game draws at its docked size (often 900p or 1080p). Sharper. The A15 can't always hold it, and it leaves less memory there; the A19 can."
     }
 }
 
@@ -36,6 +37,7 @@ struct Game: Codable, Identifiable, Hashable {
     var coolWhenHot: Bool?     // frame-step games hold 30 fps while the TV is thermally serious; nil = on (the engine's default)
     var fpsTarget: Int?        // 30 or 60 in place of the profile's fps_target; nil = the profile's
     var showFPS = true
+    var upscale: Bool?         // MetalFX upscaling to the TV's size; nil = off
     var players: String?
     var id: String { folder }
 }
@@ -49,6 +51,7 @@ final class Library: ObservableObject {
     @Published var games: [Game] = []
     @Published var selection: Game.ID?
     @Published var info: GameInfo?
+    @Published var extras: Extras?
     @Published var preview: NSImage?
     @Published var devices: [AppleTV] = []
     @Published var device: AppleTV.ID?
@@ -121,7 +124,7 @@ final class Library: ObservableObject {
 
     /// Reads the selected game's folder and refreshes the Apple TV list.
     func refresh() async {
-        info = nil; preview = nil; diagnosis = nil; notice = nil
+        info = nil; extras = nil; preview = nil; diagnosis = nil; notice = nil
         await refreshDevices()
         guard let game = current else { return }
         do {
@@ -130,6 +133,7 @@ final class Library: ObservableObject {
             info = found
             if team.isEmpty, let known = found.team { team = known }
             update { $0.name = found.name; $0.titleID = found.title_id }
+            await refreshExtras()
             await renderPreview()
         } catch { notice = error.localizedDescription }
     }
@@ -139,6 +143,27 @@ final class Library: ObservableObject {
         guard let answer = try? await Backend.ask(Answer.self, ["devices"]) else { return }
         devices = answer.devices
         if device == nil || !devices.contains(where: { $0.id == device }) { device = devices.first?.id }
+    }
+
+    func refreshExtras() async {
+        guard let game = current else { return }
+        if let found = try? await Backend.ask(Extras.self, ["extras", game.folder]), selection == game.id { extras = found }
+    }
+
+    private struct Done: Decodable {}
+
+    /// A mod on or off: its folder renamed, so the next Build & Install rewrites the game's code with the mods that are on.
+    func setMod(_ mod: Extras.Mod, on: Bool) { change(["mod", "--name", mod.name, on ? "--on" : "--no-on"]) }
+    func addMods(from url: URL) { change(["mod", "--add", url.path]) }
+    func setCheats(_ names: [String], on: Bool) { change(["cheat", on ? "--on" : "--no-on"] + names.flatMap { ["--name", $0] }) }
+    func addCheats(from url: URL, anyBuild: Bool = false) { change(["cheat", "--add", url.path] + (anyBuild ? ["--any-build"] : [])) }
+
+    private func change(_ arguments: [String]) {
+        guard let game = current else { return }
+        Task {
+            do { _ = try await Backend.ask(Done.self, [arguments[0], game.folder] + arguments.dropFirst()); notice = nil } catch { notice = error.localizedDescription }
+            await refreshExtras()
+        }
     }
 
     func setArtwork(_ url: URL?) {
@@ -165,6 +190,7 @@ final class Library: ObservableObject {
         guard let game = current, !isBusy else { return }
         var arguments = [game.folder, "--mode", game.mode.rawValue, "--texture-cap", String(game.texture.rawValue)]
         if game.showFPS { arguments.append("--fps") }
+        if game.upscale == true { arguments.append("--upscale") }
         if let scale = game.renderScale, scale < 1, info?.render_scale == true { arguments += ["--render-scale", String(scale)] }
         if game.coolWhenHot == false, info?.frame_step == true { arguments.append("--no-thermal-cap") }
         if let fps = game.fpsTarget, (info?.fps_target ?? 0) != 0, fps != info?.fps_target { arguments += ["--fps-target", String(fps)] }

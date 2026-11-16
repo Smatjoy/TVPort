@@ -1,3 +1,6 @@
+import argparse
+import contextlib
+import io
 import json
 import subprocess
 import sys
@@ -476,6 +479,58 @@ class Devices(unittest.TestCase):
         self.assertEqual(backend.tv_model(None), {})
 
 
+class GameFiles(unittest.TestCase):
+    """install() keeps the TV's romfs.img only when a finished copy left its mark, not on its size alone."""
+    def install(self, tv: dict) -> list:
+        sent = []
+        with tempfile.TemporaryDirectory() as folder:
+            app = Path(folder) / 'DmIOS.app'; app.mkdir()
+            (app / 'embedded.mobileprovision').write_text('x'); (app / 'romfs.id').write_text('DMROMFSID1 size=4 index=00\n')
+            image = Path(folder) / 'RomFS.img'; image.write_bytes(b'1234')
+            game = argparse.Namespace(app=app, romfs=image)
+
+            def run(argv, **_):
+                argv = [str(a) for a in argv]
+                if argv[3:5] == ['copy', 'to'] and argv[-1].endswith('romfs.sent'):
+                    tv['romfs.sent'] = Path(argv[argv.index('--source') + 1]).read_text()
+                if argv[3:5] == ['copy', 'to'] and argv[-1].endswith('romfs.img'):
+                    tv['romfs.img'] = Path(argv[argv.index('--source') + 1]).stat().st_size
+                    tv['placeholder'] = True
+                if argv[3:5] == ['copy', 'from'] and argv[argv.index('--source') + 1].endswith('romfs.sent') and 'romfs.sent' in tv:
+                    Path(argv[-1]).write_text(tv['romfs.sent'])
+                return subprocess.CompletedProcess(argv, 0, '', '')
+
+            def stream(argv, **_):
+                sent.append(Path(str(argv[argv.index('--source') + 1])).name)
+                assert tv.pop('placeholder', False), 'the old image must be replaced first: devicectl skips a file of the same size and date'
+                if tv.get('cut'): raise backend.Failure('copy cut off')
+                tv['romfs.img'] = 4
+            saved = backend.run, backend.stream, backend.installed_files, backend.emit, backend.stage
+            backend.run, backend.stream, backend.emit, backend.stage = run, stream, lambda *a, **k: None, lambda *a: None
+            backend.installed_files = lambda *_: {k: v for k, v in tv.items() if k == 'romfs.img'}
+            try:
+                backend.install(game, 'TV', 'b')
+            except backend.Failure:
+                pass
+            finally:
+                backend.run, backend.stream, backend.installed_files, backend.emit, backend.stage = saved
+        return sent
+
+    def test_full_size_without_mark_is_sent_again(self):
+        tv = {'romfs.img': 4}
+        self.assertEqual(self.install(tv), ['RomFS.img'])
+        self.assertEqual(tv['romfs.sent'], 'DMROMFSID1 size=4 index=00\n')
+        self.assertEqual(self.install(tv), [])   # marked now: kept
+
+    def test_a_cut_off_copy_leaves_no_mark(self):
+        tv = {'romfs.img': 4, 'romfs.sent': 'DMROMFSID1 size=4 index=00\n', 'cut': True}
+        tv['romfs.img'] = 3   # an earlier image damaged: sent again, and that copy stops partway
+        self.assertEqual(self.install(tv), ['RomFS.img'])
+        self.assertEqual(tv['romfs.sent'], '')
+        tv.update({'romfs.img': 4, 'cut': False})   # the cut off copy reached its full size
+        self.assertEqual(self.install(tv), ['RomFS.img'])
+
+
 class GameFolder(unittest.TestCase):
     def make(self, folder, *paths):
         for path in paths:
@@ -520,6 +575,112 @@ class GameFolder(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             self.make(folder, '0100ABCD00000000_build/x')
             self.assertEqual(backend.Game(Path(folder)).bundle_id('TEAM123'), 'dev.tvport.team123.g0100abcd00000000')
+
+
+MAIN_BID = 'B424BE150A8E7D78701CBE7A439D9EBF'
+CHEATS = '''[Credits: someone]
+
+{Master code}
+580F0000 01234567
+
+[--SectionStart:Coins--]
+[999 coins]
+04000000 00112233 000003E7
+[--SectionEnd:Coins--]
+[Moon jump] 80000001
+04000000 00445566 00000001
+20000000
+[999 coins]
+04000000 00112234 000003E7
+'''
+
+
+class ModsAndCheats(unittest.TestCase):
+    """The app's Mods and Cheats sections: which mods apply to the packed version, the cheat file's entries and their switches, and what a build carries"""
+
+    def game(self, folder):
+        exefs = Path(folder) / '0100000000010000_build/extract/v393216/ExeFS'
+        exefs.mkdir(parents=True)
+        (Path(folder) / '0100000000010000_build/patched_v393216').mkdir()
+        head = bytearray(0x100); head[:4] = b'NSO0'; head[0x40:0x50] = bytes.fromhex(MAIN_BID)
+        (exefs / 'main').write_bytes(bytes(head))
+        (exefs / 'main.npdm').write_bytes(b'META')
+        return backend.Game(Path(folder))
+
+    def mod(self, folder, name, filename, text):
+        d = Path(folder) / 'mods' / name / 'exefs'
+        d.mkdir(parents=True, exist_ok=True)
+        (d / filename).write_text(text)
+
+    def test_mods_that_apply_and_their_resolution(self):
+        with tempfile.TemporaryDirectory() as folder:
+            game = self.game(folder)
+            self.assertEqual(game.module_builds(), {'main': MAIN_BID + '0' * 32})   # the header's 32 bytes
+            self.mod(folder, '[1920x1080 v1.4.1]', '1.4.1.pchtxt', f'@nsobid-{MAIN_BID}\n@enabled\n00000110 AABB\n@stop\n')
+            self.mod(folder, '[1920x1080 v1.4.1]', '1.0.0.pchtxt', '@nsobid-3CA12DFAAF9C82DA064D1698DF79CDA1\n')
+            self.mod(folder, '-[2560x1440 v1.4.1]', 'a.pchtxt', f'@nsobid-{MAIN_BID}\n')
+            self.mod(folder, '[Old]', '3CA12DFAAF9C82DA.ips', '')
+            (Path(folder) / 'mods/[Textures]/romfs').mkdir(parents=True)
+            mods = {m['name']: m for m in backend.mod_entries(game)}
+            self.assertEqual(list(mods), ['[1920x1080 v1.4.1]', '[2560x1440 v1.4.1]', '[Old]', '[Textures]'])
+            self.assertEqual((mods['[1920x1080 v1.4.1]']['state'], mods['[1920x1080 v1.4.1]']['resolution']), ('applies', '1920x1080'))
+            self.assertFalse(mods['[2560x1440 v1.4.1]']['on'])
+            self.assertEqual(mods['[Old]']['state'], 'other-version')
+            self.assertEqual(mods['[Textures]']['state'], 'no-code-patches'); self.assertTrue(mods['[Textures]']['romfs'])
+            self.assertEqual(backend.mod_resolution(list(mods.values())), '1920x1080')   # the one that is off and the one for another version do not count
+
+    def test_mod_switch_renames_its_folder(self):
+        with tempfile.TemporaryDirectory() as folder:
+            self.game(folder)
+            self.mod(folder, '[LOD]', 'a.pchtxt', f'@nsobid-{MAIN_BID}\n')
+            with contextlib.redirect_stdout(io.StringIO()):
+                backend.cmd_mod(argparse.Namespace(folder=Path(folder), add=None, name='[LOD]', on=False))
+            self.assertTrue((Path(folder) / 'mods/-[LOD]').is_dir())
+            with contextlib.redirect_stdout(io.StringIO()):
+                backend.cmd_mod(argparse.Namespace(folder=Path(folder), add=None, name='[LOD]', on=True))
+            self.assertTrue((Path(folder) / 'mods/[LOD]').is_dir())
+
+    def test_adding_a_downloaded_mods_folder_adds_each_mod(self):
+        with tempfile.TemporaryDirectory() as folder, tempfile.TemporaryDirectory() as download:
+            self.game(folder)
+            for name in ('[A]', '[B]'):
+                (Path(download) / name / 'exefs').mkdir(parents=True)
+                (Path(download) / name / 'exefs/x.pchtxt').write_text(f'@nsobid-{MAIN_BID}\n')
+            (Path(download) / '[A]/exefs/._x.pchtxt').write_text('AppleDouble')
+            with contextlib.redirect_stdout(io.StringIO()):
+                backend.cmd_mod(argparse.Namespace(folder=Path(folder), add=Path(download), name=None, on=True))
+            self.assertEqual(sorted(p.name for p in (Path(folder) / 'mods').iterdir()), ['[A]', '[B]'])
+            self.assertFalse((Path(folder) / 'mods/[A]/exefs/._x.pchtxt').exists())
+            with self.assertRaises(backend.Failure):   # the same mod again
+                backend.cmd_mod(argparse.Namespace(folder=Path(folder), add=Path(download) / '[A]', name=None, on=True))
+
+    def test_cheat_file_entries(self):
+        cheats = backend.read_cheats(CHEATS)
+        self.assertEqual(cheats, [('Master code', True), ('999 coins', False), ('Moon jump', False), ('999 coins', False)])   # labels and section markers are not cheats
+        self.assertEqual(backend.cheat_keys(cheats), ['Master code', '999 coins', 'Moon jump', '999 coins #2'])
+
+    def test_switches_and_what_a_build_carries(self):
+        with tempfile.TemporaryDirectory() as folder, tempfile.TemporaryDirectory() as download:
+            game = self.game(folder)
+            self.assertIsNone(backend.stage_cheats(game))
+            other = Path(download) / '3CA12DFAAF9C82DA.txt'; other.write_text(CHEATS)
+            with self.assertRaises(backend.Failure):   # named after another version
+                backend.cmd_cheat(argparse.Namespace(folder=Path(folder), add=other, any_build=False, name=[], on=True))
+            mine = Path(download) / 'Odyssey cheats.txt'; mine.write_text(CHEATS)
+            with contextlib.redirect_stdout(io.StringIO()):
+                backend.cmd_cheat(argparse.Namespace(folder=Path(folder), add=mine, any_build=False, name=[], on=True))
+            entries = backend.cheat_entries(game)
+            self.assertEqual(entries['file'], str(game.folder / 'cheats/B424BE150A8E7D78.txt'))
+            self.assertEqual([c['on'] for c in entries['cheats']], [True, False, False, False])   # the master is always on
+            self.assertIsNone(backend.stage_cheats(game))   # nothing on yet: the build carries no cheats
+            with contextlib.redirect_stdout(io.StringIO()):
+                backend.cmd_cheat(argparse.Namespace(folder=Path(folder), add=None, any_build=False, name=['999 coins #2', 'Moon jump'], on=True))
+            self.assertEqual((Path(folder) / 'cheats/B424BE150A8E7D78.enabled').read_text(), 'Moon jump\n999 coins #2\n')
+            staged = backend.stage_cheats(game)
+            self.assertEqual(sorted(p.name for p in staged.iterdir()), ['B424BE150A8E7D78.enabled', 'B424BE150A8E7D78.txt'])
+            with contextlib.redirect_stdout(io.StringIO()):
+                backend.cmd_cheat(argparse.Namespace(folder=Path(folder), add=None, any_build=False, name=['Moon jump'], on=False))
+            self.assertEqual([c['name'] for c in backend.cheat_entries(game)['cheats'] if c['on'] and not c['master']], ['999 coins #2'])
 
 
 if __name__ == '__main__':
