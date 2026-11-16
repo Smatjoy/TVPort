@@ -6,7 +6,14 @@
 #import <QuartzCore/CAMetalLayer.h>
 #import <Metal/Metal.h>
 #import <AVFAudio/AVFAudio.h>
+#if TARGET_OS_TV
+#import <AVKit/AVKit.h>   // AVDisplayManager (front_screen_match)
+#import <CoreMedia/CoreMedia.h>
+#endif
 #include <errno.h>
+#include <os/proc.h>
+#include <mach/mach.h>
+#include <sys/sysctl.h>
 #include "front.h"
 #include "hle.h"
 #include "dm.h"
@@ -25,6 +32,7 @@ bool dm_show_launcher(void *view_controller, void (*done)(void));   // Launcher.
 
 static CAMetalLayer *g_layer;
 static void front_ios_power_watch(void);
+static void front_ios_device_report(void);
 static void front_ios_audio_watch(void);
 static UILabel *front_ios_fps_label(void);
 
@@ -84,6 +92,7 @@ static void launcher_done(void) { [g_root startGame]; }
 #endif
     self.view.backgroundColor = UIColor.blackColor;
     front_ios_power_watch();
+    front_ios_device_report();
     if (!front_ios_boot_ok()) {   // No game files: show a hint and do not start the host
         UILabel *lb = [[UILabel alloc] initWithFrame:CGRectInset(self.view.bounds, 40, 40)];
         lb.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
@@ -222,6 +231,54 @@ static void front_ios_power_watch(void) {
         (void)n; LOG("front end: Low Power Mode → %s (%.0f s after launch)", dm_low_power_now() ? "on" : "off", (now_ns() - g_t0_ns) / 1e9); }];
     LOG("front end: thermal state %d, brightness %.2f, Low Power Mode %s", dm_thermal_now(), g_brightness, dm_low_power_now() ? "on" : "off");
 }
+
+// One line that says what the device is, so a log reads on its own: the model, the GPU (its name, the architecture a pipeline archive is made for, the newest Apple GPU family),
+// BC texture support (without it nvn_mtl.m stores BC textures decoded), the RAM and the app's memory limit. The limit is what os_proc_available_memory leaves plus the footprint
+// already used, measured together: the system ends the app there (2,097 MB on the A15 Apple TV 4K)
+static void front_ios_device_report(void) {
+    char machine[64] = "?"; size_t n = sizeof machine; sysctlbyname("hw.machine", machine, &n, NULL, 0);
+    id<MTLDevice> d = MTLCreateSystemDefaultDevice();
+    int family = 0; for (int f = 1020; f > 1000 && d; f--) if ([d supportsFamily:(MTLGPUFamily)f]) { family = f - 1000; break; }
+    NSString *arch = [(id)d respondsToSelector:@selector(architecture)] ? d.architecture.name : nil;
+    task_vm_info_data_t vm; mach_msg_type_number_t cnt = TASK_VM_INFO_COUNT;
+    uint64_t foot = task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vm, &cnt) == KERN_SUCCESS ? vm.phys_footprint : 0;
+    uint64_t avail = os_proc_available_memory();
+    LOG("front end: device %s, GPU %s (%s, Metal family Apple%d), BC textures %s, RAM %llu MB, memory limit %llu MB (%llu available + %llu footprint), thermal state %d",
+        machine, d ? d.name.UTF8String : "none", arch ? arch.UTF8String : "architecture unknown", family, d && d.supportsBCTextureCompression ? "native" : "not supported",
+        NSProcessInfo.processInfo.physicalMemory >> 20, (avail + foot) >> 20, avail >> 20, foot >> 20, dm_thermal_now());
+}
+
+#if TARGET_OS_TV
+// The display's refresh rate matched to the game's frame rate (the tvOS side of front_screen_match, which nvn_mtl.m link_sync calls with the rate the game paces at; the Mac's is
+// in front_mac.m). An Apple TV outputs the rate of its Format setting, often 50 Hz in Europe, and a 60 fps game shown at 50 Hz drops every sixth frame (Odyssey on the A19: p99
+// exactly 20 ms). AVDisplayManager asks tvOS for a mode at the game's rate; tvOS follows it only with Settings > Video and Audio > Match Content > Match Frame Rate on, and puts its
+// own mode back when the app leaves. 30 fps asks for 60 Hz, a multiple. The format description is SDR, as the game's picture is. DM_SCREEN_MATCH=0 turns it off, as on the Mac
+static _Atomic int g_match_want;   // written by the present thread only
+static void tv_match_apply(void) {   // main thread
+    static int off = -1, applied, watching;
+    if (off < 0) { const char *e = getenv("DM_SCREEN_MATCH"); off = e && !strcmp(e, "0"); if (off) LOG("front end: the display keeps its refresh rate (DM_SCREEN_MATCH=0)"); }
+    int fps = g_match_want; UIWindow *w = g_root.view.window;
+    if (off || fps <= 0 || fps == applied || !w) return;
+    float hz = fps < 60 ? 60 : fps;
+    CMVideoFormatDescriptionRef fd = NULL;
+    OSStatus r = CMVideoFormatDescriptionCreate(NULL, kCMVideoCodecType_HEVC, 3840, 2160, NULL, &fd);
+    if (r != noErr || !fd) { LOG("[RED] front end: no video format description for the display mode request (OSStatus %d)", (int)r); return; }
+    AVDisplayManager *m = w.avDisplayManager;
+    if (!watching) {
+        watching = 1;
+        [NSNotificationCenter.defaultCenter addObserverForName:AVDisplayManagerModeSwitchEndNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
+            (void)note; LOG("front end: display mode switch ended, the screen runs at %ld Hz", (long)g_root.view.window.windowScene.screen.maximumFramesPerSecond); }];
+    }
+    m.preferredDisplayCriteria = [[AVDisplayCriteria alloc] initWithRefreshRate:hz formatDescription:fd];
+    CFRelease(fd); applied = fps;
+    if (m.displayCriteriaMatchingEnabled) LOG("front end: asked tvOS for a %.0f Hz display mode for the game's %d fps (the screen runs at %ld Hz)", hz, fps, (long)w.windowScene.screen.maximumFramesPerSecond);
+    else LOG("front end: the game paces at %d fps, the screen runs at %ld Hz, and tvOS keeps it there: Settings > Video and Audio > Match Content > Match Frame Rate is off", fps, (long)w.windowScene.screen.maximumFramesPerSecond);
+}
+void front_screen_match(int fps) {
+    if (fps <= 0 || g_match_want == fps) return;
+    g_match_want = fps; dispatch_async(dispatch_get_main_queue(), ^{ tv_match_apply(); });
+}
+#endif
 
 // Frame-rate counter: the frames put on screen in the last second (nvn_mtl.m counts them for NVN and for the Vulkan layer alike; frames the display link merged away are not counted).
 // On when the IPA was built with it (the NSP script's SHOW_FPS / --show-fps → DMShowFPS in Info.plist); DM_SHOW_FPS=0 / 1 in Documents/env.txt overrides that without a rebuild. NULL when off

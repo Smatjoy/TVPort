@@ -158,6 +158,16 @@ static int boot_env(void) {
     }
     setenv("DM_ENV_FILE_KEYS", [from_file componentsJoinedByString:@" "].UTF8String, 1);   // the launcher keeps what an env file set (LauncherSettings.swift)
     setenv("DM_ENV_LAUNCH_KEYS", [from_launch componentsJoinedByString:@" "].UTF8String, 1);   // and what the launch environment set (docs/frontends.md, Saved choices)
+    // Cheats chosen on the Mac (TVPort; build_ipa.sh DM_CHEATS_DIR → dm/cheats in the bundle): the bundle is read-only, and the engine keeps its state files beside the cheat file
+    // (hle_cheats.c), so each launch copies them over <data>/cheats, which then holds exactly the Mac's choice, and points DM_CHEATS there. Without the folder nothing changes
+    NSString *bundled = [[res stringByAppendingPathComponent:@"dm"] stringByAppendingPathComponent:@"cheats"];
+    if (!getenv("DM_CHEATS") && [fm fileExistsAtPath:bundled]) {
+        NSString *dir = [doc stringByAppendingPathComponent:@"cheats"];
+        [fm removeItemAtPath:dir error:nil];
+        NSError *e = nil;
+        if ([fm copyItemAtPath:bundled toPath:dir error:&e]) setenv("DM_CHEATS", dir.fileSystemRepresentation, 1);
+        else fprintf(stderr, "[RED] boot: the bundled cheats could not be copied to %s: %s\n", dir.UTF8String, e.localizedDescription.UTF8String);
+    }
     front_hud_env();   // before the early loading below can make a device
     // Game language (nn::oe::GetDesiredLanguage, hle_oe.c): the one the IPA was packed with (the NSP script's LANGUAGE / --language → DMLanguage in Info.plist), unless an env file sets DM_LANG
     // (or the launcher, which replaces this default before the game starts)

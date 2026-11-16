@@ -59,6 +59,8 @@ PSO_GPUS = ''                           # NVN games: GPU architectures the app g
                                         #   another device's name is in its log when the app has none for it), so the device does not build them on its first start; each adds about 650 MB to the app (Breath of the Wild) and minutes to a first build; 'none' = no archive;
                                         #   empty = by the game's profile: 'g18p' when it sets pso_mtl4 on (the Metal 4 path, the only one that reads the archive on iOS, is on for it), else 'none'
                                         #   PLATFORM 'mac-app': the Mac app's archive (Resources/pso), empty = this Mac's GPU (e.g. 'g14s' for an M2 Max), 'none' = the app builds its bases on its first start
+MODS = ''                               # optional: a folder of ExeFS mods (<mod>/exefs/*.pchtxt or *.ips, as mod sites share them); those naming the packed build's modules are applied to
+                                        #   the game's code before the rewrite, so they are part of the app (dm/tools/exefs_mods.py); a mod folder whose name starts with '-' is off
 SHOW_FPS = True                         # True shows the game's frame rate on the iPhone (frames on screen per second, top left); DM_SHOW_FPS=0 / 1 in the app's Documents/env.txt changes it without a rebuild
 MOTION = True                           # True passes a gyro controller's motion (on iOS also the phone's own) to games that read it; False builds with DM_MOTION=0, for when motion misbehaves (DM_MOTION=1 in the app's Documents/env.txt turns it back on without a rebuild)
 SURVEY_ONLY = False                     # a game with no profile in dm/games: only write the survey, no provisional profile and no IPA
@@ -1097,7 +1099,26 @@ def nro_modules(g, exe_dir, nros):
     return set_keys(g, {'modules': (' '.join(mods), f'the NROs the game loads at run time import from {why}, which main does not')}, 'After the NRO collection')
 
 
-def rewrite(py, repo, exe_dir, out, env, logs, g, provisional=False):
+def apply_mods(py, repo, exe_dir, mods_dir, out, logs, g):
+    """The ExeFS mods of mods_dir that name the profile's modules (dm/tools/exefs_mods.py), each module patched into out/<module>: {module: patched file}. Empty without mods_dir.
+    The rewrite takes the patched modules instead of the game's, and its key covers their content, so adding, changing or removing a mod rewrites the modules again"""
+    rmtree(out)
+    if not mods_dir: return {}
+    mods_dir = Path(os.path.expanduser(mods_dir)).resolve()
+    if not mods_dir.is_dir(): raise BuildError(f'--mods / MODS: no folder {mods_dir}')
+    PROG.add(1); PROG.stage('mods', step=str(mods_dir))   # a stage the plan does not count
+    out.mkdir(parents=True)
+    done, lines = {}, []
+    for m in g.words('modules'):
+        log = logs / f'mods_{m}.log'
+        run([py, repo / 'dm/tools/exefs_mods.py', mods_dir, exe_dir / m, out / m], log)
+        lines += [l.removeprefix('exefs_mods: ') for l in log.read_text().splitlines() if l.startswith('exefs_mods: ') and '→' not in l and 'no mod names' not in l]
+        if (out / m).is_file(): done[m] = out / m
+    PROG.end('; '.join(lines) if lines else f'none of the mods in {mods_dir} names this build\'s modules')
+    return done
+
+
+def rewrite(py, repo, exe_dir, out, env, logs, g, provisional=False, modded=None):
     """patch_nso.py on every code module (each writes its own <module>.* files, all the same build_src.sha256 line), each with its log, as many at once as the Mac has cores.
     The modules are the profile's and the NROs the game registers (collect_nros; nro.tsv beside them lists those); a provisional profile first gets the subsdks those NROs import from (nro_modules).
     Reused when the modules, patch_nso.py (with nso.py, nso_code.py, nso_asm.py and the selected profile's function rules / the patch files of their builds), its switches and capstone are as at the
@@ -1112,7 +1133,7 @@ def rewrite(py, repo, exe_dir, out, env, logs, g, provisional=False):
     if provisional and nros: g = nro_modules(g, exe_dir, nros)
     mods = g.words('modules')
     manifest = nro_dir / 'nro.tsv'
-    src = {m: exe_dir / m for m in mods} | nros
+    src = {m: (modded or {}).get(m, exe_dir / m) for m in mods} | nros   # the ExeFS mods' patched modules (apply_mods) in place of the game's
     names = list(src)
     kf = out.with_name(out.name + '.key')
     # the repository profile's build rows decide which builds the rewriter treats as the game's own (SDK-wide function patches skip those), so they are an input too
@@ -1139,7 +1160,8 @@ def rewrite(py, repo, exe_dir, out, env, logs, g, provisional=False):
                     log = logs / f'rewrite_{m}.log'
                     PROG.end(ok=False)
                     PROG.say(f'---- last lines of {log} ----\n' + ''.join(collections.deque(open(log, errors='replace'), maxlen=40)).rstrip('\n'))
-                    raise BuildError(f'patch_nso.py exit code {p.returncode} on {m} (full output: {log})')
+                    raise BuildError(f'patch_nso.py exit code {p.returncode} on {m} (full output: {log})'
+                                     + (f'; {m} carries ExeFS mods: one writing over a registered cut stops the rewrite ("original bytes" in the log), so try without it' if m in (modded or {}) else ''))
             time.sleep(0.2)
     finally:   # an error or an interrupt stops the other rewrites
         for p in procs.values():
@@ -2204,6 +2226,7 @@ def parse_args(argv):
     ap.add_argument('--gpu', help='NVN games: GPU architectures the app gets its pipeline archive for, made on this Mac with metal-tt, comma-separated: g18p (A19 / A19 Pro), or the name a device\'s log gives when the app has no archive for its GPU; '
                     'none = no archive, the device builds the bases on its first start (default: the PSO_GPUS setting; when that is empty, g18p for a game whose profile sets pso_mtl4 on, else none). '
                     'With --platform mac-app: the Mac app\'s archive, by default for this Mac\'s GPU (none: the app builds the bases on its first start)')
+    ap.add_argument('--mods', help='a folder of ExeFS mods (<mod>/exefs/*.pchtxt or *.ips): those naming the packed build\'s modules are applied to the game\'s code before the rewrite; a mod folder starting with - is off (default: the MODS setting, none)')
     ap.add_argument('--show-fps', action=argparse.BooleanOptionalAction, help='show the game\'s frame rate on the iPhone, frames on screen per second at the top left (default: the SHOW_FPS setting, on)')
     ap.add_argument('--motion', action=argparse.BooleanOptionalAction, help='pass a gyro controller\'s motion (on iOS also the phone\'s own) to games that read it; --no-motion builds with DM_MOTION=0, for when motion misbehaves (default: the MOTION setting, on)')
     ap.add_argument('--survey-only', action='store_true', help='a game with no profile: only the survey, no provisional profile and no IPA')
@@ -2449,7 +2472,8 @@ def main(args=None):
         + (f'; the game\'s languages: {" ".join(have)}' if have else '; the control data lists no languages (not checked)') + (' (DM_LANG=<code> in the run command changes it)' if mac else ' (DM_LANG=<code> in the app\'s Documents/env.txt changes it)'))
 
     patched = work / f'patched_{pkg_ver}'
-    g = rewrite(py, repo, game / 'ExeFS', patched, env, logs, g, provisional)
+    modded = apply_mods(py, repo, game / 'ExeFS', args.mods or MODS, work / f'mods_{pkg_ver}', logs, g)
+    g = rewrite(py, repo, game / 'ExeFS', patched, env, logs, g, provisional, modded)
     chain_header(py, repo, env, logs)   # before any host is built
     if provisional or derived:   # the keys that need the rewritten modules, then (provisional) the heap check (both only change keys the host is built with, not the rewrite or the shader steps)
         provisional_prep(py, repo, env, logs, g)

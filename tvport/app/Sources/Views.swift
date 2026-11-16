@@ -273,10 +273,15 @@ struct SettingsForm: View {
                 Button("Look Again") { Task { await library.refreshDevices() } }
             }
             Section("Performance") {
-                Picker("Render mode", selection: binding(\.mode)) { ForEach(RenderMode.allCases) { Text($0.label).tag($0) } }
-                Text(library.current?.mode.note ?? "").font(.caption).foregroundStyle(.secondary)
+                Picker("Render mode", selection: binding(\.mode)) {
+                    ForEach(RenderMode.allCases) { mode in
+                        Text(mode == .docked ? library.extras?.mod_resolution.map { "Docked (\($0.replacingOccurrences(of: "x", with: "×")), from a mod)" } ?? mode.label : mode.label).tag(mode)
+                    }
+                }
+                Text(library.current?.mode.note ?? "").font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 Picker("Texture detail", selection: binding(\.texture)) { ForEach(TextureDetail.allCases) { Text($0.label).tag($0) } }
-                Text("The A15 has to store these textures uncompressed, so lower detail saves memory and shortens loading.").font(.caption).foregroundStyle(.secondary)
+                Text(library.currentTV?.chip == "A19" ? "This Apple TV reads these textures as they are, so Full costs little."
+                                                      : "The A15 has to store these textures uncompressed, so lower detail saves memory and shortens loading.").font(.caption).foregroundStyle(.secondary)
                 if library.info?.render_scale == true {
                     Picker("3D resolution", selection: renderScaleBinding) {
                         ForEach([1.0, 0.9, 0.8, 0.75, 0.7, 0.6, 0.5], id: \.self) { Text($0 == 1 ? "Full" : "\(Int(($0 * 100).rounded()))%").tag($0) }
@@ -294,8 +299,17 @@ struct SettingsForm: View {
                     Text("When tvOS reports the TV as hot, it lowers the chip's speed, the GPU to about a third, whatever the game does, and this makes the game hold 30 fps so the TV cools down sooner. Off, the game keeps trying for 60, which it can then rarely reach, and the TV stays hot and slow for longer. Takes effect at the next Build & Install.")
                         .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
+                Picker("Upscaling to 4K", selection: upscaleBinding) {
+                    Text("Standard").tag(false)
+                    Text("MetalFX").tag(true)
+                }
+                Text(library.current?.upscale == true
+                     ? "Apple's MetalFX enlarges the game's picture to the TV's size: sharper edges and text, a little more GPU time. Takes effect at the next Build & Install."
+                     : "The game's picture is stretched to the TV's size as it is. MetalFX makes it sharper for a little more GPU time. Takes effect at the next Build & Install.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 Toggle("Frame-rate counter", isOn: binding(\.showFPS))
             }
+            ModsSection()
             Section("Saves") {
                 TextField("Players", text: playersBinding, prompt: Text("Names, separated by commas"))
                 Text("With two or more names, the Apple TV asks who's playing, and each person gets their own saves. The first name picked keeps the saves already on the TV. Takes effect at the next Build & Install.")
@@ -330,6 +344,10 @@ struct SettingsForm: View {
         }
     }
 
+    private var upscaleBinding: Binding<Bool> {
+        Binding(get: { library.current?.upscale ?? false }, set: { value in library.update { $0.upscale = value ? true : nil } })
+    }
+
     private func place(_ game: Game) -> String {
         (library.backups[game.folder]?.last_backup_place ?? library.info?.last_backup_place) == "icloud" ? "iCloud Drive" : "this Mac"
     }
@@ -352,6 +370,97 @@ struct SettingsForm: View {
 
     private func binding<T>(_ path: WritableKeyPath<Game, T>) -> Binding<T> {
         Binding(get: { library.current![keyPath: path] }, set: { value in library.update { $0[keyPath: path] = value } })
+    }
+}
+
+/// The game's code mods (applied at build time) and cheat codes (run on the TV), each with its switch.
+struct ModsSection: View {
+    @EnvironmentObject var library: Library
+    @State private var choosingMod = false
+    @State private var choosingCheats = false
+    @State private var cheatFilter = ""
+
+    var body: some View {
+        Section {
+            if let extras = library.extras {
+                if extras.mods.isEmpty {
+                    Text("No mods. Add a mod folder from a mod site: one with an exefs folder of .pchtxt or .ips files, made for this game's version.").font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+                ForEach(extras.mods) { mod in
+                    Toggle(isOn: Binding(get: { mod.on }, set: { library.setMod(mod, on: $0) })) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(mod.name)
+                            if let note = modNote(mod) { Text(note).font(.caption).foregroundStyle(mod.state == "applies" ? Color.secondary : Color.orange) }
+                        }
+                    }
+                    .disabled(library.isBusy)
+                }
+                HStack {
+                    Button("Add Mod…") { choosingMod = true }.disabled(library.isBusy)
+                    Button("Show in Finder") { reveal(extras.mods_folder) }
+                }
+                .fileImporter(isPresented: $choosingMod, allowedContentTypes: [.folder]) { result in
+                    if case .success(let url) = result { library.addMods(from: url) }
+                }
+                Text("Mods change the game's code when TVPort builds it, so a change here takes effect at the next Build & Install, which then rewrites the code again (a few minutes). A mod made for another version does nothing.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            } else {
+                ProgressView().controlSize(.small)
+            }
+        } header: { Text("Mods") }
+        Section {
+            if let extras = library.extras {
+                let cheats = extras.cheats.cheats
+                if extras.cheats.build.isEmpty {
+                    Text("Build the game once first: its version decides which cheat file it reads.").font(.caption).foregroundStyle(.secondary)
+                } else if extras.cheats.file == nil {
+                    Text("No cheats for this version (build \(extras.cheats.build)). Add an Atmosphère cheat file: a site lists them by build ID, and this version's is \(extras.cheats.build).txt."
+                         + (extras.cheats.others.isEmpty ? "" : " The cheats folder holds files for other versions (\(extras.cheats.others.joined(separator: ", "))), whose addresses would be wrong here."))
+                        .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                } else {
+                    let plain = cheats.filter { !$0.master }
+                    HStack {
+                        Text("\(plain.filter(\.on).count) of \(plain.count) on").foregroundStyle(.secondary)
+                        Spacer()
+                        if plain.count > 8 { TextField("Search", text: $cheatFilter).frame(maxWidth: 160) }
+                        Button("All Off") { library.setCheats(plain.filter(\.on).map(\.name), on: false) }.disabled(!plain.contains(where: \.on) || library.isBusy)
+                    }
+                    ForEach(cheats.filter { cheatFilter.isEmpty || $0.name.localizedCaseInsensitiveContains(cheatFilter) }) { cheat in
+                        Toggle(cheat.master ? "\(cheat.name) (always on: the file's master code)" : cheat.name,
+                               isOn: Binding(get: { cheat.on }, set: { library.setCheats([cheat.name], on: $0) }))
+                            .disabled(cheat.master || library.isBusy)
+                    }
+                }
+                if !extras.cheats.build.isEmpty {
+                    HStack {
+                        Button(extras.cheats.file == nil ? "Add Cheat File…" : "Replace Cheat File…") { choosingCheats = true }.disabled(library.isBusy)
+                        Button("Show in Finder") { reveal(extras.cheats_folder) }
+                    }
+                    .fileImporter(isPresented: $choosingCheats, allowedContentTypes: [.plainText, .text]) { result in
+                        if case .success(let url) = result { library.addCheats(from: url) }
+                    }
+                    Text("Cheats run while you play. The ones that are on go to the Apple TV at the next Build & Install. Cheats that change the game's code (rather than values such as coins or health) work only on a Mac: the Apple TV can't change signed code, so it skips them.")
+                        .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        } header: { Text("Cheats") }
+    }
+
+    private func modNote(_ mod: Extras.Mod) -> String? {
+        var notes: [String] = []
+        switch mod.state {
+        case "other-version": notes.append("Made for another version of the game: does nothing here")
+        case "no-code-patches": notes.append("No code patches (.pchtxt or .ips): TVPort can't use this mod")
+        default: if let size = mod.resolution { notes.append("Docked draws at \(size.replacingOccurrences(of: "x", with: "×"))") }
+        }
+        if mod.romfs { notes.append("its romfs files are not used") }
+        return notes.isEmpty ? nil : notes.joined(separator: "; ")
+    }
+
+    private func reveal(_ path: String) {
+        let url = URL(fileURLWithPath: path)
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        NSWorkspace.shared.activateFileViewerSelecting([url])
     }
 }
 

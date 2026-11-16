@@ -62,6 +62,7 @@ No `patches.py`. `op_mode` stays docked: Odyssey only takes its motion moves in 
 
 General host and tool changes first needed here; each applies to every game:
 
+- **Offline pipeline archive for tvOS** (`pso_offline.py --platform tvos`): [Offline pipeline archive made for iOS on an Apple TV](../../../docs/reference/shaders.md#offline-pipeline-archive-made-for-ios-on-an-apple-tv).
 - **Chinese language aliases in both settings equality operators:** [Chinese language aliases in settings comparisons](../../../docs/reference/services.md#chinese-language-aliases-in-settings-comparisons).
 - **BAHS pairs omitted from vertex padding:** [Pixel shader inputs the vertex shader does not write](../../../docs/reference/shaders.md#pixel-shader-inputs-the-vertex-shader-does-not-write).
 - **Front end at `-O1`** (`dmsh_build.py` and `ios_metal.py`): [Front end at -O1: Apple's control-flow lowering](../../../docs/reference/shaders.md#front-end-at--o1-apples-control-flow-lowering).
