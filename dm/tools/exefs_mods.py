@@ -66,7 +66,7 @@ def read_pchtxt(text: str, source: str):
     for n, raw in enumerate(text.splitlines(), 1):
         line = raw.strip()
         if not line.startswith('"') and '"' not in line: line = line.split('//')[0].strip()
-        if not line or line.startswith('#') or line.startswith('//'): continue
+        if not line or line.startswith(('#', '//')): continue
         where = f'{source}:{n}'
         if line.startswith('@'):
             word = line.split()[0].lower()
@@ -153,7 +153,7 @@ def write_nso(module: nso.Module, path: Path) -> None:
 
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
-    if len(argv) != 3: sys.exit(__doc__.rsplit('Usage: ', 1)[1])
+    if len(argv) != 3: sys.exit((__doc__ or '').rsplit('Usage: ', 1)[-1])
     root, src, dst = map(Path, argv)
     try:
         m = nso.read(src)
